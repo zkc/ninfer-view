@@ -33,7 +33,9 @@ const ctxStub = {
   strokeStyle: "", fillStyle: "", lineWidth: 1, font: "", textAlign: "",
   _calls: { fillText: 0, stroke: 0 },
   _fills: [],
+  _moveTo: [],
 };
+ctxStub.moveTo = function (x, y) { ctxStub._moveTo.push({ x, y }); };
 ctxStub.fillText = function (text, x, y) {
   ctxStub._calls.fillText++;
   ctxStub._fills.push({ text: String(text), x, y, align: ctxStub.textAlign });
@@ -146,10 +148,16 @@ const fetchImpl = (url, opts) => {
   });
 };
 
+const intervals = [];              // recorded setInterval registrations
+let fakeNow = Date.now();          // controllable dashboard clock
+class FakeDate extends Date {      // the script only uses Date.now() and new Date(ms)
+  static now() { return fakeNow; }
+}
 const sandbox = {
   document, window: { addEventListener: () => {}, devicePixelRatio: 1 },
   requestAnimationFrame: (fn) => fn(),
-  setInterval: () => 0,
+  setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+  Date: FakeDate,
   fetch: fetchImpl,
   EventSource,
   alert: (msg) => { console.error("alert():", msg); },
@@ -209,6 +217,99 @@ const tick = () => new Promise((r) => setImmediate(r));
   console.assert(rightLabels.length >= 5,
     "right y-axis labels missing (single shared axis?): " + rightLabels.length);
   console.log("right-axis labels: " + rightLabels.map((f) => f.text).join(","));
+
+  // idle-gap handling: a 40 s gap between samples (>> breakGapMs) must break
+  // the line — each series restarts its segment at the later point instead of
+  // drawing a long diagonal connector. Geometry: w=600, padL=46, yRight →
+  // padR=46, pw=508; grid moveTos sit at x=46 (excluded by x>50).
+  const T = 1700000000000;
+  ctxStub._moveTo.length = 0;
+  sandbox.drawChart(getEl("chartTput"), {
+    xMin: T, xMax: T + 120000,
+    yLeft: { min: 0 }, yRight: { min: 0 },
+    breakGapMs: 10000,
+    series: [
+      { name: "a", axis: "left",  pts: [[T + 1000, 5], [T + 50000, 7], [T + 90000, 9]] },
+      { name: "b", axis: "right", pts: [[T + 1000, 2], [T + 50000, 3], [T + 90000, 4]] },
+    ],
+  });
+  const segStarts = ctxStub._moveTo.filter((p) => p.x > 200);
+  console.assert(segStarts.length === 4,
+    "idle gap did not break the line (expected 2 restarts x 2 series): " + segStarts.length);
+
+  // timer jitter (2 s gaps < breakGapMs) must NOT break the line
+  ctxStub._moveTo.length = 0;
+  sandbox.drawChart(getEl("chartTput"), {
+    xMin: T, xMax: T + 120000, yLeft: { min: 0 },
+    breakGapMs: 10000,
+    series: [{ name: "a", pts: [[T + 50000, 5], [T + 52000, 6], [T + 54000, 9]] }],
+  });
+  console.assert(ctxStub._moveTo.filter((p) => p.x > 50).length === 1,
+    "small gap broke the line (jitter should stay connected)");
+
+  // rolling window: all points scrolled out → grid + hint, no empty box
+  ctxStub._fills.length = 0;
+  sandbox.drawChart(getEl("chartTput"), {
+    xMin: 1000000000, xMax: 2000000000,
+    series: [{ name: "x", pts: [[500000000, 5]] }],
+  });
+  console.assert(ctxStub._fills.some((f) => f.text === "no recent samples"),
+    "scrolled-out window did not show the 'no recent samples' hint");
+
+  // step-scroll: the x-axis is pinned to the latest sample (log input rate),
+  // not Date.now() — a new sample 5 s later must advance xMax by exactly 5 s
+  const winOpts = [];
+  const realDraw = sandbox.drawChart;
+  sandbox.drawChart = (cv, o) => { winOpts.push(o); };
+  sandbox.renderCharts();
+  sandbox.drawChart = realDraw;
+  const xMaxA = winOpts.length ? winOpts[winOpts.length - 1].xMax : null;
+  fire("throughput", R("throughput", {
+    timestamp_unix_ms: now + 5000, interval_seconds: 5,
+    tokens: { computed_prefill: 0, committed_decode: 300 },
+    scheduler: { running: 1, prefilling: 0, decode_ready: 1, waiting: 0 },
+    decode_batch: { rounds: 60, row_rounds: 60, average_size: 1 } }));
+  await tick();
+  winOpts.length = 0;
+  sandbox.drawChart = (cv, o) => { winOpts.push(o); };
+  sandbox.renderCharts();
+  sandbox.drawChart = realDraw;
+  const xMaxB = winOpts.length ? winOpts[winOpts.length - 1].xMax : null;
+  console.assert(xMaxA === now, "xMax not pinned to latest sample (got " + xMaxA + ", want " + now + ")");
+  console.assert(xMaxB === now + 5000, "xMax did not advance one interval per sample (got " + xMaxB + ", want " + (now + 5000) + ")");
+
+  // idle advance: with NO new samples the window keeps moving at the log
+  // rate — one interval of axis per interval of real time, quantized to whole
+  // intervals (neither faster than the input, nor frozen)
+  const lastXMax = () => winOpts.length ? winOpts[winOpts.length - 1].xMax : null;
+  const capRender = () => {
+    winOpts.length = 0;
+    sandbox.drawChart = (cv, o) => { winOpts.push(o); };
+    sandbox.renderCharts();
+    sandbox.drawChart = realDraw;
+  };
+  fakeNow += 5000;                 // one stats interval of real time
+  capRender();
+  console.assert(lastXMax() === now + 10000,
+    "idle advance did not move xMax by one interval (got " + lastXMax() + ", want " + (now + 10000) + ")");
+  fakeNow += 4999;                 // sub-interval drift: no partial advance
+  capRender();
+  console.assert(lastXMax() === now + 10000,
+    "partial (sub-interval) advance moved the window (got " + lastXMax() + ")");
+  fakeNow += 10000;                // two more intervals
+  capRender();
+  console.assert(lastXMax() === now + 20000,
+    "xMax should track real time at the log rate (got " + lastXMax() + ", want " + (now + 20000) + ")");
+
+  // the idle-advance timer is registered at half the stats cadence (2500 ms
+  // at the 5 s default) and its callback repaints the visible metrics pane
+  const adv = intervals.find((iv) => iv.ms === 2500);
+  console.assert(adv, "idle-advance interval (2500 ms) not registered");
+  getEl("pane-metrics").style.display = "flex";
+  const strokes = ctxStub._calls.stroke;
+  adv.fn();
+  console.assert(ctxStub._calls.stroke > strokes,
+    "idle-advance timer callback did not repaint the charts");
 
   // summary line should reflect done/active/rejected counts
   const summary = getEl("reqSummary").textContent;

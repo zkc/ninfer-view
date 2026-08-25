@@ -321,7 +321,37 @@ logEl.addEventListener("scroll", () => {
 const reqs = new Map();   // request_id -> {id,status,start,startMs,done?,doneMs?}
 const tput = new Map();   // timestamp_ms -> point (dedupes re-ingested samples)
 const TP_MAX = 4000;
+let sampleIntervalMs = 5000;  // the server's --log-stats-interval-ms (default 5000);
+                              // updated from server_start.engine.log_stats_interval_ms.
+                              // Sets the charts' window width and the idle-advance
+                              // step (the x-axis moves one of these per interval of
+                              // real time, matching the log input rate).
 let reqDirty = false, chartDirty = false, rafPending = false;
+
+// xMax reference for the charts' rolling window. Anchored to the latest
+// throughput sample; while the server is idle it keeps advancing forward at
+// the LOG RATE — one interval of axis per interval of real time, quantized to
+// whole intervals — so the chart scrolls at the same pace it had while
+// following the input (neither faster nor frozen). The advance is computed
+// from real time at render (chartRefNow), so a throttled timer only delays
+// the repaint, never the position.
+let chartAnchorWall = 0;    // Date.now() (dashboard clock) when anchor was set
+let chartAnchorRef = null;  // xMax value (sample-time space) at chartAnchorWall
+
+function chartRefNow() {
+  if (chartAnchorRef == null) return null;
+  const advance = Math.floor((Date.now() - chartAnchorWall) / sampleIntervalMs)
+                  * sampleIntervalMs;
+  return chartAnchorRef + advance;
+}
+function noteChartSample(ts) {
+  // Follow the input: anchor the window to the newest sample (forward-only,
+  // so an out-of-order/old sample can't drag the view backwards).
+  if (chartAnchorRef == null || ts > chartAnchorRef) {
+    chartAnchorRef = ts;
+    chartAnchorWall = Date.now();
+  }
+}
 
 function markReq()   { reqDirty = true;   scheduleRender(); }
 function markChart() { chartDirty = true; scheduleRender(); }
@@ -337,6 +367,13 @@ function scheduleRender() {
 
 function ingest(rec) {
   const ev = rec.event, ts = rec.timestamp_unix_ms || Date.now();
+  if (ev === "server_start") {
+    // Remember the stats cadence so the charts' rolling window and the
+    // idle-gap threshold match the server's actual sampling interval.
+    const iv = rec.engine && rec.engine.log_stats_interval_ms;
+    if (iv && iv > 0) { sampleIntervalMs = Number(iv); markChart(); }
+    return;
+  }
   if (ev === "request_start") {
     const id = rec.request && rec.request.request_id;
     if (id != null && !reqs.has(id))
@@ -372,6 +409,7 @@ function ingest(rec) {
       for (const k of tput.keys()) if (k < oldest) oldest = k;
       tput.delete(oldest);
     }
+    noteChartSample(ts);
     markChart();
   }
 }
@@ -645,6 +683,17 @@ function tsShort(ms) {
   return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
 }
 
+// Second-aligned x tick times across [xMin, xMax] — stable labels while the
+// rolling window scrolls (no wobbling mid-second ticks).
+function tickTimes(xMin, xMax) {
+  const span = Math.max(1, xMax - xMin);
+  const steps = [2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000];
+  const step = steps.find((s) => span / s <= 7) || 600000;
+  const out = [];
+  for (let t = Math.ceil(xMin / step) * step; t <= xMax; t += step) out.push(t);
+  return out;
+}
+
 function sizeCanvas(cv) {
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth || cv.parentElement.clientWidth || 400;
@@ -674,8 +723,11 @@ function drawChart(cv, o) {
   // full vertical range on its own scale.
   const mkAxis = (side) => {
     let m = 0;
+    // Scale to the points inside the rolling window only, so samples that
+    // have scrolled out of view can't pin the axis scale.
     for (const s of o.series) if ((s.axis || "left") === side)
-      for (const p of s.pts) if (p[1] != null && p[1] > m) m = p[1];
+      for (const p of s.pts)
+        if (p[0] >= xMin && p[0] <= xMax && p[1] != null && p[1] > m) m = p[1];
     const spec = side === "right" ? o.yRight : (o.yLeft || {});
     const min = spec.min != null ? spec.min
               : (side === "left" && o.yMin != null ? o.yMin : 0);
@@ -690,6 +742,22 @@ function drawChart(cv, o) {
     const a = side === "right" ? AX.right : AX.left;
     return padT + ph - (y - a.min) / (a.max - a.min) * ph;
   };
+  // The axis is a rolling real-time window; if every point has scrolled out
+  // (long idle), keep the time grid moving and say so instead of drawing an
+  // empty box.
+  let visible = 0;
+  for (const s of o.series) for (const p of s.pts)
+    if (p[0] >= xMin && p[0] <= xMax && p[1] != null) visible++;
+  if (!visible) {
+    ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.font = "10px monospace";
+    for (let i = 0; i <= 4; i++) {
+      const yy = padT + ph - (ph * i) / 4;
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+    }
+    ctx.fillStyle = "#484f58"; ctx.font = "11px monospace"; ctx.textAlign = "center";
+    ctx.fillText("no recent samples", padL + pw / 2, h / 2);
+    return;
+  }
   // grid + y labels (each axis labels its own scale; color matches series)
   ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.font = "10px monospace";
   ctx.textAlign = "right";
@@ -705,12 +773,20 @@ function drawChart(cv, o) {
       ctx.fillText(AX.right.fmt(rv), w - padR + 6, yy + 3);
     }
   }
-  // x labels
+  // x labels (second-aligned ticks when provided — the rolling window)
   ctx.textAlign = "center";
-  for (let i = 0; i <= 4; i++) {
-    const xv = xMin + (xMax - xMin) * i / 4;
-    ctx.fillStyle = "#8b949e";
-    ctx.fillText(o.xFmt ? o.xFmt(xv) : "", X(xv), h - 6);
+  if (o.xticks && o.xticks.length) {
+    for (const xv of o.xticks) {
+      if (xv < xMin || xv > xMax) continue;
+      ctx.fillStyle = "#8b949e";
+      ctx.fillText(o.xFmt ? o.xFmt(xv) : "", X(xv), h - 6);
+    }
+  } else {
+    for (let i = 0; i <= 4; i++) {
+      const xv = xMin + (xMax - xMin) * i / 4;
+      ctx.fillStyle = "#8b949e";
+      ctx.fillText(o.xFmt ? o.xFmt(xv) : "", X(xv), h - 6);
+    }
   }
   // series
   for (const s of o.series) {
@@ -718,11 +794,16 @@ function drawChart(cv, o) {
     ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
     ctx.setLineDash(s.dashed ? [4, 3] : []);
     ctx.beginPath();
-    let started = false;
+    let started = false, lastT = null;
     for (const p of s.pts) {
-      if (p[1] == null) { started = false; continue; }
+      if (p[1] == null || p[0] < xMin) { started = false; lastT = null; continue; }
+      // Break the line across time gaps longer than o.breakGapMs: after an
+      // idle stretch the server resumes at a new timestamp, and drawing a
+      // connector across the gap would show a long diagonal artefact.
+      if (lastT != null && o.breakGapMs && p[0] - lastT > o.breakGapMs) started = false;
       const xx = X(p[0]), yy = Y(p[1], s.axis || "left");
       if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
+      lastT = p[0];
     }
     ctx.stroke(); ctx.setLineDash([]);
   }
@@ -750,28 +831,38 @@ function renderCharts() {
     " tok/s \u00b7 running " + (last.running != null ? last.running : 0) +
     " \u00b7 waiting " + (last.waiting != null ? last.waiting : 0) +
     " \u00b7 batch " + f2(last.batch);
-  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-  const span = Math.max(1000, t1 - t0);
-  const xMin = t0, xMax = t1 + span * 0.02;
+  // Rolling window whose right edge (xMax) is the anchored reference: pinned
+  // to the latest sample while data flows, and advancing one interval per
+  // interval of real time while idle — the same pace as following the input.
+  // drawChart's gap-break (breakGapMs) keeps a resample after an idle stretch
+  // from drawing a long diagonal; the idle stretch shows as blank axis.
+  const winMs = Math.max(30000, 24 * sampleIntervalMs);  // ~2 min at the 5 s default
+  const xMax = chartRefNow();
+  const xMin = xMax - winMs;
+  const xticks = tickTimes(xMin, xMax);
+  const breakGapMs = 2 * sampleIntervalMs;  // tolerate timer jitter, break real idle gaps
+  const vis = pts.filter((p) => p.t >= xMin);  // skip what has scrolled out
   drawChart($("chartTput"), {
-    xMin, xMax, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    xMin, xMax, xticks, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    breakGapMs,
     yLeft:  { min: 0, color: "#d29922" },
     yRight: { min: 0, color: "#3fb950" },
     series: [
       { name: "prefill", color: "#d29922", axis: "left",
-        pts: pts.map((p) => [p.t, p.pfill]) },
+        pts: vis.map((p) => [p.t, p.pfill]) },
       { name: "decode", color: "#3fb950", axis: "right",
-        pts: pts.map((p) => [p.t, p.dec]) },
+        pts: vis.map((p) => [p.t, p.dec]) },
     ],
   });
   drawChart($("chartSched"), {
-    xMin, xMax, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    xMin, xMax, xticks, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    breakGapMs,
     series: [
-      { name: "running",      color: "#3fb950", pts: pts.map((p) => [p.t, p.running]) },
-      { name: "prefilling",   color: "#d29922", pts: pts.map((p) => [p.t, p.prefilling]) },
-      { name: "decode_ready", color: "#58a6ff", pts: pts.map((p) => [p.t, p.decode_ready]) },
-      { name: "waiting",      color: "#f85149", pts: pts.map((p) => [p.t, p.waiting]) },
-      { name: "avg batch",    color: "#d2a8ff", pts: pts.map((p) => [p.t, p.batch]), dashed: true },
+      { name: "running",      color: "#3fb950", pts: vis.map((p) => [p.t, p.running]) },
+      { name: "prefilling",   color: "#d29922", pts: vis.map((p) => [p.t, p.prefilling]) },
+      { name: "decode_ready", color: "#58a6ff", pts: vis.map((p) => [p.t, p.decode_ready]) },
+      { name: "waiting",      color: "#f85149", pts: vis.map((p) => [p.t, p.waiting]) },
+      { name: "avg batch",    color: "#d2a8ff", pts: vis.map((p) => [p.t, p.batch]), dashed: true },
     ],
   });
 }
@@ -1492,6 +1583,15 @@ function backfill(d) {
 fetch("/api/state").then((r) => r.json()).then(applyState).catch(() => {});
 fetch("/api/logs?limit=2000").then((r) => r.json()).then(backfill).catch(() => {});
 setInterval(tick, 1000);
+// Idle-advance timer: the charts' window position is computed from real time
+// in chartRefNow() (one interval of axis per interval of real time), so this
+// timer only triggers repaints so the axis keeps moving while the server is
+// idle. It runs at half the stats cadence so the tick lands within ~2.5 s of
+// each interval boundary; the actual position is always correct at render.
+setInterval(() => {
+  if (chartAnchorRef != null && tput.size &&
+      $("pane-metrics").style.display !== "none") renderCharts();
+}, Math.max(250, sampleIntervalMs / 2));
 connect();
 </script>
 </body>

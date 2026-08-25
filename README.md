@@ -44,6 +44,16 @@ Dashboard has four tabs: **Log** (formatted JSONL), **Requests** (table),
   left, decode right, color-coded — so a prefill spike can't squash the
   decode line) and *Scheduler* (running / prefilling / decode_ready /
   waiting + avg decode batch), plus a current-values readout.
+  The x-axis is a **rolling window** (~2 min = 24 intervals, paces from
+  the server's `--log-stats-interval-ms`, read from `server_start`) whose
+  right edge is anchored to the latest sample and advances at the **log
+  input rate**: while data flows it follows the newest entry, and while the
+  server is idle it keeps stepping forward — one interval of axis per
+  interval of real time, quantized to whole intervals — so the chart scrolls
+  at exactly the pace it had while following the input (never faster, never
+  frozen). A line is never drawn across an idle gap (a resample starts a
+  fresh segment instead of a long diagonal); the idle stretch shows up as a
+  blank span of axis. Samples older than the window scroll out.
 - **Config tab**: form for the full launch command, built from the
   "Server options" table in `docs/serving.md` — target (binary, artifact,
   host, port, model-id, api-key), sizing (max context, kv capacity
