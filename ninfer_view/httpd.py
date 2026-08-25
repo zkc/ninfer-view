@@ -1,0 +1,157 @@
+"""Local HTTP server: dashboard page, REST actions, and an SSE event stream.
+
+Routes (bound to 127.0.0.1 only; local tool, no auth):
+    GET  /                dashboard (web/index.html)
+    GET  /api/state       state snapshot
+    GET  /api/logs        recent console events (backfill)
+    GET  /api/profiles    saved launch profiles
+    POST /api/profiles    upsert a profile
+    POST /api/start       {profile_id}
+    POST /api/stop
+    GET  /api/stream      SSE: state | console | lifecycle | progress | activity
+"""
+
+from __future__ import annotations
+
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+class Handler(BaseHTTPRequestHandler):
+    service = None  # injected by serve()
+
+    def log_message(self, fmt, *args):  # keep the daemon quiet
+        pass
+
+    # -- plumbing ---------------------------------------------------------
+
+    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, obj, code: int = 200) -> None:
+        self._send(code, json.dumps(obj).encode(), "application/json")
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            return json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+
+    # -- routes -----------------------------------------------------------
+
+    def do_GET(self):
+        try:
+            self._handle_get()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:  # keep the daemon alive; report clean JSON
+            self._json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def _handle_get(self):
+        path = urlparse(self.path).path
+        if path == "/":
+            try:
+                body = (WEB_DIR / "index.html").read_bytes()
+            except OSError as e:
+                return self._send(500, f"missing web/index.html: {e}".encode(),
+                                  "text/plain")
+            self._send(200, body, "text/html; charset=utf-8")
+        elif path == "/api/state":
+            self._json(self.service.snapshot())
+        elif path == "/api/logs":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = max(1, min(5000, int(qs.get("limit", ["500"])[0])))
+            except ValueError:
+                limit = 500
+            self._json({"logs": self.service.bus.recent_logs(limit)})
+        elif path == "/api/profiles":
+            self._json({"profiles": self.service.profiles.all()})
+        elif path == "/api/stream":
+            self._sse()
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        try:
+            self._handle_post()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:  # keep the daemon alive; report clean JSON
+            self._json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def _handle_post(self):
+        path = urlparse(self.path).path
+        body = self._read_json()
+        if path == "/api/start":
+            profile_id = str(body.get("profile_id", "default"))
+            ok, err = self.service.start(profile_id)
+            self._json({"ok": ok, "error": err}, 200 if ok else 400)
+        elif path == "/api/stop":
+            ok, err = self.service.stop()
+            self._json({"ok": ok, "error": err}, 200 if ok else 400)
+        elif path == "/api/profiles":
+            profile = body.get("profile") or {}
+            try:
+                self.service.profiles.save(profile)
+            except (ValueError, TypeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            self._json({"ok": True})
+        else:
+            self._json({"error": "not found"}, 404)
+
+    # -- SSE ----------------------------------------------------------------
+
+    def _sse_write(self, name: str, data: dict) -> None:
+        payload = json.dumps(data, default=str).encode()
+        self.wfile.write(b"event: " + name.encode() + b"\ndata: " + payload + b"\n\n")
+        self.wfile.flush()
+
+    def _sse(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q = self.service.bus.subscribe()
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            # Replay current state so a late subscriber renders correctly.
+            self._sse_write("state", self.service.snapshot())
+            while True:
+                try:
+                    ev = q.get(timeout=15)
+                except Exception:  # queue.Empty
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+                    continue
+                self._sse_write(str(ev.get("kind", "event")), ev)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.service.bus.unsubscribe(q)
+
+
+def serve(service, host: str, port: int) -> ThreadingHTTPServer:
+    Handler.service = service
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
+    print(f"ninfer-view dashboard: http://{host}:{port}")
+    print("Ctrl-C to quit.")
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        server.server_close()
+    return server

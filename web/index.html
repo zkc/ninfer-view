@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ninfer-view</title>
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #30363d;
+  --text: #c9d1d9; --dim: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --amber: #d29922; --red: #f85149;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column;
+}
+
+header {
+  display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.badge {
+  display: inline-flex; align-items: center; gap: 7px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; font-size: 12px; color: var(--dim);
+}
+.badge .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+.badge.running .dot { background: var(--green); animation: pulse 1.6s infinite; }
+.badge.running { color: var(--green); }
+.badge.starting .dot, .badge.loading .dot, .badge.warming .dot, .badge.stopping .dot {
+  background: var(--amber); animation: pulse 1s infinite; }
+.badge.starting, .badge.loading, .badge.warming, .badge.stopping { color: var(--amber); }
+.badge.crashed .dot { background: var(--red); }
+.badge.crashed { color: var(--red); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.meta { color: var(--dim); font-size: 13px; }
+.meta b { color: var(--text); font-weight: 500; }
+.spacer { flex: 1; }
+button {
+  font: inherit; font-size: 13px; font-weight: 600; padding: 6px 18px;
+  border-radius: 6px; border: 1px solid var(--border); background: #21262d;
+  color: var(--text); cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--dim); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+button.danger { background: #42191b; border-color: #f8514966; color: var(--red); }
+
+#progress { display: none; padding: 12px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--border); }
+#progress .bar { height: 8px; border-radius: 4px; background: #21262d;
+  overflow: hidden; margin-top: 8px; }
+#progress .bar i { display: block; height: 100%; width: 0%;
+  background: var(--accent); transition: width .5s; }
+#progress .plabel { color: var(--dim); font-size: 12px;
+  display: flex; gap: 18px; flex-wrap: wrap; }
+
+#consolewrap { flex: 1; display: flex; flex-direction: column; min-height: 0;
+  padding: 10px 16px 14px; gap: 8px; }
+#consolebar { display: flex; gap: 10px; align-items: center; }
+#filter {
+  flex: 0 1 260px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); padding: 5px 10px; font: 12px var(--mono);
+}
+#consolebar .hint { color: var(--dim); font-size: 12px; }
+#console {
+  flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px; font: 12px/1.5 var(--mono);
+  white-space: pre-wrap; word-break: break-word;
+}
+#console .line { display: flex; gap: 8px; }
+#console .ts { color: #484f58; flex: 0 0 auto; }
+#console .lvl { flex: 0 0 56px; font-weight: 700; text-transform: uppercase;
+  font-size: 10px; letter-spacing: .05em; padding-top: 2px; }
+#console .msg { flex: 1; }
+#console .info .lvl { color: var(--dim); }
+#console .info .msg { color: var(--text); }
+#console .warning .lvl, #console .warning .msg { color: var(--amber); }
+#console .error .lvl, #console .error .msg { color: var(--red); }
+#console .activity .msg { color: #a5d6ff; }
+#console .lifecycle .msg { color: #d2a8ff; }
+</style>
+</head>
+<body>
+<header>
+  <span class="badge stopped" id="badge"><span class="dot"></span><span id="stateText">STOPPED</span></span>
+  <span class="meta" id="meta">no instance</span>
+  <span class="spacer"></span>
+  <span class="meta" id="uptime"></span>
+  <button class="primary" id="startBtn">Start</button>
+  <button class="danger" id="stopBtn" disabled>Stop</button>
+</header>
+
+<div id="progress">
+  <div class="plabel">
+    <span id="progPhase">loading&hellip;</span>
+    <span id="progPct"></span>
+    <span id="progBytes"></span>
+    <span id="progElapsed"></span>
+  </div>
+  <div class="bar"><i id="progFill"></i></div>
+</div>
+
+<div id="consolewrap">
+  <div id="consolebar">
+    <input id="filter" placeholder="filter console&hellip;" autocomplete="off" spellcheck="false">
+    <span class="hint" id="count">0 lines</span>
+    <span class="spacer"></span>
+    <span class="hint" id="runDir"></span>
+  </div>
+  <div id="console"></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const consoleEl = $("console"), badge = $("badge"), stateText = $("stateText");
+const metaEl = $("meta"), uptimeEl = $("uptime"), progEl = $("progress");
+const startBtn = $("startBtn"), stopBtn = $("stopBtn");
+const entries = [];                       // {ts, level, message, kind}
+const MAX = 4000;
+let pinned = true;
+let lastState = { state: "stopped" };
+
+consoleEl.addEventListener("scroll", () => {
+  pinned = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 40;
+});
+
+const esc = (x) => String(x).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const timeOnly = (ts) => ts ? ts.slice(11) : "--:--:--.---";
+
+function lineNode(e) {
+  const div = document.createElement("div");
+  const cls = e.level || "info";
+  div.className = "line " + cls + (e.kind ? " " + e.kind : "");
+  const ts = document.createElement("span"); ts.className = "ts";
+  ts.textContent = timeOnly(e.ts);
+  const lvl = document.createElement("span"); lvl.className = "lvl";
+  lvl.textContent = cls;
+  const msg = document.createElement("span"); msg.className = "msg";
+  msg.textContent = e.message;
+  div.append(ts, lvl, msg);
+  return div;
+}
+
+function applyFilter() {
+  const f = $("filter").value.trim().toLowerCase();
+  consoleEl.textContent = "";
+  const frag = document.createDocumentFragment();
+  let n = 0;
+  for (const e of entries) {
+    if (f && !e.message.toLowerCase().includes(f)) continue;
+    frag.appendChild(lineNode(e)); n++;
+  }
+  consoleEl.appendChild(frag);
+  $("count").textContent = n + (n === 1 ? " line" : " lines");
+  if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function addEntry(e) {
+  entries.push(e);
+  if (entries.length > MAX) entries.splice(0, entries.length - MAX);
+  const f = $("filter").value.trim().toLowerCase();
+  if (!f || e.message.toLowerCase().includes(f)) {
+    consoleEl.appendChild(lineNode(e));
+    if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+  $("count").textContent = entries.length + " lines";
+}
+
+function fmtUp(s) {
+  if (s == null) return "";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + "h " : "") + m + "m " + sec + "s up";
+}
+
+function applyState(s) {
+  lastState = s || lastState;
+  const st = lastState.state || "stopped";
+  badge.className = "badge " + st;
+  stateText.textContent = st.toUpperCase();
+  startBtn.disabled = !["stopped", "crashed"].includes(st);
+  stopBtn.disabled = !["starting", "loading", "warming", "running"].includes(st);
+
+  const bits = [];
+  if (lastState.model_id) bits.push("<b>" + esc(lastState.model_id) + "</b>");
+  if (lastState.endpoint) bits.push(esc(lastState.endpoint));
+  if (lastState.pid != null) bits.push("pid " + lastState.pid);
+  if (lastState.exit_code != null) bits.push("exit " + lastState.exit_code);
+  if (lastState.error) bits.push("⚠ " + esc(lastState.error));
+  metaEl.innerHTML = bits.length ? bits.join(" · ") : "no instance";
+  $("runDir").textContent = lastState.run_dir ? esc(lastState.run_dir) : "";
+
+  if ((st === "loading" || st === "starting") && lastState.progress) {
+    const p = lastState.progress;
+    progEl.style.display = "block";
+    $("progPhase").textContent = "loading · " + (p.phase || "");
+    $("progPct").textContent = p.percent != null ? p.percent.toFixed(1) + "%" : "";
+    $("progBytes").textContent =
+      p.total ? p.done + " / " + p.total : (p.done || "");
+    $("progElapsed").textContent =
+      p.elapsed_s != null ? p.elapsed_s.toFixed(0) + " s elapsed" : "";
+    $("progFill").style.width = (p.percent == null ? 4 : p.percent) + "%";
+  } else if (st === "warming" || st === "stopping") {
+    progEl.style.display = "block";
+    $("progPhase").textContent = st === "warming" ? "warming up…" : "stopping…";
+    $("progPct").textContent = ""; $("progBytes").textContent = "";
+    $("progElapsed").textContent = "";
+    $("progFill").style.width = "100%";
+  } else {
+    progEl.style.display = "none";
+  }
+}
+
+function tick() {
+  const now = Date.now() / 1000;
+  if (lastState.state === "running" && lastState.running_at) {
+    uptimeEl.textContent = fmtUp(now - lastState.running_at);
+  } else if (lastState.started_at &&
+             ["starting", "loading", "warming"].includes(lastState.state)) {
+    uptimeEl.textContent = "started " + Math.round(now - lastState.started_at) + "s ago";
+  } else {
+    uptimeEl.textContent = "";
+  }
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.addEventListener("state", (ev) => { applyState(JSON.parse(ev.data)); tick(); });
+  for (const kind of ["console", "lifecycle", "progress", "activity"]) {
+    es.addEventListener(kind, (ev) => addEntry(JSON.parse(ev.data)));
+  }
+  es.addEventListener("error", () => {
+    // EventSource reconnects on its own; re-backfill history on failure.
+    fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
+      entries.length = 0;
+      for (const e of d.logs) entries.push(e);
+      applyFilter();
+    }).catch(() => {});
+  });
+}
+
+startBtn.onclick = async () => {
+  startBtn.disabled = true;
+  const r = await fetch("/api/start", { method: "POST",
+    body: JSON.stringify({ profile_id: "default" }) });
+  const d = await r.json();
+  if (!d.ok) alert("start failed: " + (d.error || r.status));
+};
+stopBtn.onclick = async () => {
+  stopBtn.disabled = true;
+  const r = await fetch("/api/stop", { method: "POST" });
+  const d = await r.json();
+  if (!d.ok) alert("stop: " + (d.error || r.status));
+};
+$("filter").addEventListener("input", applyFilter);
+
+// Backfill + initial state, then go live.
+fetch("/api/state").then((r) => r.json()).then(applyState).catch(() => {});
+fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
+  for (const e of d.logs) entries.push(e);
+  applyFilter();
+}).catch(() => {});
+setInterval(tick, 1000);
+connect();
+</script>
+</body>
+</html>
