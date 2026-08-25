@@ -40,8 +40,10 @@ Dashboard has four tabs: **Log** (formatted JSONL), **Requests** (table),
   done/active/rejected/error summary.
 - **Metrics tab**: two plain-canvas charts (no build step, no library),
   redrawn live — *Throughput* (prefill + decode tok/s, computed as
-  `tokens / interval_seconds`) and *Scheduler* (running / prefilling /
-  decode_ready / waiting + avg decode batch), plus a current-values readout.
+  `tokens / interval_seconds`; each series on its **own y-axis** — prefill
+  left, decode right, color-coded — so a prefill spike can't squash the
+  decode line) and *Scheduler* (running / prefilling / decode_ready /
+  waiting + avg decode batch), plus a current-values readout.
 - **Config tab**: form for the full launch command, built from the
   "Server options" table in `docs/serving.md` — target (binary, artifact,
   host, port, model-id, api-key), sizing (max context, kv capacity
@@ -143,9 +145,10 @@ asserts the request table + charts build from schema-v10 records).
    error), protocol, prompt/gen tokens, finish reason, ttft, prefill &
    decode tok/s, wall, prefix-cache hits, speculative acceptance. Click a
    row to expand its raw start+done JSON. The **Metrics** tab shows two live
-   charts: *Throughput* (prefill + decode tok/s) and *Scheduler* (running /
-   prefilling / decode_ready / waiting + avg decode batch), plus a
-   current-values readout. Both update in real time from the same JSONL.
+   charts: *Throughput* (prefill + decode tok/s on separate left/right
+   y-axes) and *Scheduler* (running / prefilling / decode_ready / waiting +
+   avg decode batch), plus a current-values readout. Both update in real
+   time from the same JSONL.
 
 5. **Stop**: click **Stop** (or from the tray in M3). Header goes to
    `STOPPED (exit 0)`; the child exited cleanly via SIGINT and the JSONL

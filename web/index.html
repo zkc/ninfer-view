@@ -141,7 +141,6 @@ tbody tr.detail td { background: #0a0d12; white-space: pre-wrap; word-break: bre
 /* ---- metrics charts ---- */
 #metricsBar { display: flex; gap: 10px; align-items: center; }
 .chartcol { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-.chartrow { flex: 1; display: flex; gap: 10px; min-height: 0; }
 .chartbox { flex: 1; min-height: 140px; border: 1px solid var(--border);
   border-radius: 6px; background: var(--bg); padding: 8px 10px;
   display: flex; flex-direction: column; }
@@ -263,15 +262,11 @@ tbody tr.detail td { background: #0a0d12; white-space: pre-wrap; word-break: bre
       <span class="hint" id="curTput">no throughput data yet</span>
     </div>
     <div class="chartcol">
-      <div class="chartrow">
-        <div class="chartbox">
-          <div class="charttitle">Prefill <span style="color:#484f58">tok/s</span></div>
-          <canvas id="chartPrefill"></canvas>
-        </div>
-        <div class="chartbox">
-          <div class="charttitle">Decode <span style="color:#484f58">tok/s</span></div>
-          <canvas id="chartDecode"></canvas>
-        </div>
+      <div class="chartbox">
+        <div class="charttitle">Throughput <span style="color:#484f58">tok/s</span> &middot;
+          <span style="color:#d29922">prefill (left axis)</span> /
+          <span style="color:#3fb950">decode (right axis)</span></div>
+        <canvas id="chartTput"></canvas>
       </div>
       <div class="chartbox">
         <div class="charttitle">Scheduler queue + avg decode batch</div>
@@ -664,7 +659,7 @@ function sizeCanvas(cv) {
 function drawChart(cv, o) {
   const { ctx, w, h } = sizeCanvas(cv);
   ctx.clearRect(0, 0, w, h);
-  const padL = 46, padR = 10, padT = 12, padB = 20;
+  const padL = 46, padR = o.yRight ? 46 : 10, padT = 12, padB = 20;
   const pw = w - padL - padR, ph = h - padT - padB;
   if (pw < 20 || ph < 20) return;
   const { xMin, xMax } = o;
@@ -673,24 +668,42 @@ function drawChart(cv, o) {
     ctx.fillText("no data yet", padL, h / 2);
     return;
   }
-  const yMin = o.yMin != null ? o.yMin : 0;
-  let yMax = o.yMax;
-  if (yMax == null) {
+  // Y axes: the left axis always exists; `o.yRight` adds a second,
+  // independently scaled axis (series opt in with `axis: "right"`), so e.g.
+  // a prefill spike cannot squash the decode line — each series gets the
+  // full vertical range on its own scale.
+  const mkAxis = (side) => {
     let m = 0;
-    for (const s of o.series) for (const p of s.pts)
-      if (p[1] != null && p[1] > m) m = p[1];
-    yMax = m <= 0 ? 1 : m * 1.12;
-  }
+    for (const s of o.series) if ((s.axis || "left") === side)
+      for (const p of s.pts) if (p[1] != null && p[1] > m) m = p[1];
+    const spec = side === "right" ? o.yRight : (o.yLeft || {});
+    const min = spec.min != null ? spec.min
+              : (side === "left" && o.yMin != null ? o.yMin : 0);
+    const max = spec.max != null ? spec.max : (m <= 0 ? 1 : m * 1.12);
+    return { min, max,
+             fmt: spec.fmt || o.yFmt || ((v) => String(Math.round(v))),
+             color: spec.color || "#8b949e" };
+  };
+  const AX = { left: mkAxis("left"), right: o.yRight ? mkAxis("right") : null };
   const X = (x) => padL + (x - xMin) / (xMax - xMin) * pw;
-  const Y = (y) => padT + ph - (y - yMin) / (yMax - yMin) * ph;
-  // grid + y labels
+  const Y = (y, side) => {
+    const a = side === "right" ? AX.right : AX.left;
+    return padT + ph - (y - a.min) / (a.max - a.min) * ph;
+  };
+  // grid + y labels (each axis labels its own scale; color matches series)
   ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.font = "10px monospace";
   ctx.textAlign = "right";
   for (let i = 0; i <= 4; i++) {
-    const yv = yMin + (yMax - yMin) * i / 4, yy = Y(yv);
+    const yy = padT + ph - (ph * i) / 4;
     ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
-    ctx.fillStyle = "#8b949e";
-    ctx.fillText(o.yFmt ? o.yFmt(yv) : String(Math.round(yv)), padL - 6, yy + 3);
+    const lv = AX.left.min + (AX.left.max - AX.left.min) * i / 4;
+    ctx.fillStyle = AX.left.color; ctx.textAlign = "right";
+    ctx.fillText(AX.left.fmt(lv), padL - 6, yy + 3);
+    if (AX.right) {
+      const rv = AX.right.min + (AX.right.max - AX.right.min) * i / 4;
+      ctx.fillStyle = AX.right.color; ctx.textAlign = "left";
+      ctx.fillText(AX.right.fmt(rv), w - padR + 6, yy + 3);
+    }
   }
   // x labels
   ctx.textAlign = "center";
@@ -708,7 +721,7 @@ function drawChart(cv, o) {
     let started = false;
     for (const p of s.pts) {
       if (p[1] == null) { started = false; continue; }
-      const xx = X(p[0]), yy = Y(p[1]);
+      const xx = X(p[0]), yy = Y(p[1], s.axis || "left");
       if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
     }
     ctx.stroke(); ctx.setLineDash([]);
@@ -727,8 +740,7 @@ function renderCharts() {
   const pts = [...tput.values()].sort((a, b) => a.t - b.t);
   if (!pts.length) {
     $("curTput").textContent = "no throughput data yet";
-    drawChart($("chartPrefill"), { series: [], xMin: null, xMax: null });
-    drawChart($("chartDecode"), { series: [], xMin: null, xMax: null });
+    drawChart($("chartTput"), { series: [], xMin: null, xMax: null });
     drawChart($("chartSched"), { series: [], xMin: null, xMax: null });
     return;
   }
@@ -741,16 +753,15 @@ function renderCharts() {
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
   const span = Math.max(1000, t1 - t0);
   const xMin = t0, xMax = t1 + span * 0.02;
-  drawChart($("chartPrefill"), {
-    xMin, xMax, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+  drawChart($("chartTput"), {
+    xMin, xMax, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    yLeft:  { min: 0, color: "#d29922" },
+    yRight: { min: 0, color: "#3fb950" },
     series: [
-      { name: "prefill", color: "#d29922", pts: pts.map((p) => [p.t, p.pfill]) },
-    ],
-  });
-  drawChart($("chartDecode"), {
-    xMin, xMax, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
-    series: [
-      { name: "decode", color: "#3fb950", pts: pts.map((p) => [p.t, p.dec]) },
+      { name: "prefill", color: "#d29922", axis: "left",
+        pts: pts.map((p) => [p.t, p.pfill]) },
+      { name: "decode", color: "#3fb950", axis: "right",
+        pts: pts.map((p) => [p.t, p.dec]) },
     ],
   });
   drawChart($("chartSched"), {

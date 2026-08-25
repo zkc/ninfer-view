@@ -32,8 +32,12 @@ const ctxStub = {
   measureText: (t) => ({ width: String(t).length * 6 }),
   strokeStyle: "", fillStyle: "", lineWidth: 1, font: "", textAlign: "",
   _calls: { fillText: 0, stroke: 0 },
+  _fills: [],
 };
-ctxStub.fillText = function () { ctxStub._calls.fillText++; };
+ctxStub.fillText = function (text, x, y) {
+  ctxStub._calls.fillText++;
+  ctxStub._fills.push({ text: String(text), x, y, align: ctxStub.textAlign });
+};
 ctxStub.stroke = function () { ctxStub._calls.stroke++; };
 
 const elById = new Map();
@@ -196,6 +200,15 @@ const tick = () => new Promise((r) => setImmediate(r));
   console.assert(curTput.textContent.includes("tok/s"), "curTput readout missing, got: " + curTput.textContent);
   console.assert(ctxStub._calls.fillText > 0 && ctxStub._calls.stroke > 0,
     "chart code path did not run (fillText=%d stroke=%d)", ctxStub._calls.fillText, ctxStub._calls.stroke);
+
+  // dual y-axis on the throughput chart: color-coded right-axis labels for
+  // the decode scale (absent when both series share a single left axis)
+  ctxStub._fills.length = 0;
+  sandbox.renderCharts();
+  const rightLabels = ctxStub._fills.filter((f) => f.align === "left" && f.x > 500);
+  console.assert(rightLabels.length >= 5,
+    "right y-axis labels missing (single shared axis?): " + rightLabels.length);
+  console.log("right-axis labels: " + rightLabels.map((f) => f.text).join(","));
 
   // summary line should reflect done/active/rejected counts
   const summary = getEl("reqSummary").textContent;
