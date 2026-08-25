@@ -5,15 +5,21 @@ a dashboard (browser) plus — in a later milestone — a GNOME top-bar tray ico
 
 See `PROPOSAL.md` for the full design and milestone plan.
 
-## Status: M1 complete (JSONL log stream + attach + /health)
+## Status: M1 + M2 complete (JSONL log stream, attach, /health, request table, metrics)
 
 M0 delivered the vertical slice: profile → spawn → live view → clean stop.
 M1 makes the **log stream fed only by the child's
 `--request-log-jsonl` file** (schema v10 — the authoritative, unrounded
 source per `docs/serving.md`), adds **attach mode** for externally launched
 instances, and adds a **`/health` poller** as liveness ground truth.
+M2 adds the **request table** and **throughput/scheduler charts** — both
+aggregate the *same* records the log pane consumes (backfill + SSE), so the
+server stays stateless and there is no second data path.
 
-- `GET /` — dashboard (status header, load progress bar, live log pane,
+Dashboard has three tabs: **Log** (formatted JSONL), **Requests** (table),
+**Metrics** (two live charts).
+
+- `GET /` — dashboard (status header, load progress bar, tabbed content,
   health chip, attach form)
 - `POST /api/start` / `POST /api/stop` — launch / SIGINT-stop the child
   (serialized by a dedicated action lock)
@@ -26,6 +32,16 @@ instances, and adds a **`/health` poller** as liveness ground truth.
 - `GET /api/stream` — SSE: `state` plus the six schema-v10 events
   (`server_start`, `request_start`, `request_rejected`, `request_done`,
   `request_error`, `throughput`); state events publish only on change
+- **Requests tab**: pairs `request_start` → `done/rejected/error` by
+  `request_id`. Columns: status, protocol, started, prompt/gen tokens,
+  finish reason, ttft, prefill/decode tok/s (unrounded, from
+  `timings_seconds`), wall, prefix-cache hits, speculative acceptance.
+  Click a row to expand the raw start+done records; filter box + a
+  done/active/rejected/error summary.
+- **Metrics tab**: two plain-canvas charts (no build step, no library),
+  redrawn live — *Throughput* (prefill + decode tok/s, computed as
+  `tokens / interval_seconds`) and *Scheduler* (running / prefilling /
+  decode_ready / waiting + avg decode batch), plus a current-values readout.
 - **JSONL tailer** (`jsonl_tail.py`): append-follower on `requests.jsonl`
   (poll-and-read; the server flushes per event). Malformed / non-ninfer lines
   are skipped and counted; consumer exceptions can't kill it.
@@ -40,8 +56,7 @@ instances, and adds a **`/health` poller** as liveness ground truth.
 - fresh per-run dir under `~/.local/state/ninfer-view/runs/<ts>/` with
   `argv.txt`, `stderr.log`, and the injected `requests.jsonl`
 
-Not yet in (M2+): JSONL request table & charts, tray icon, config drawer in
-the UI.
+Not yet in (M3+): tray icon, config drawer in the UI.
 
 ## Run
 
@@ -75,7 +90,9 @@ dir (`$NINFER_VIEW_HOME/profiles.json`) and the run dirs
 ## Testing (manual checklist)
 
 Automated tests (no ninfer needed): `python3 tests/test_console_parse.py`,
-`python3 tests/test_jsonl_tail.py`, and `python3 tests/test_health.py`.
+`python3 tests/test_jsonl_tail.py`, `python3 tests/test_health.py`, and
+`node tests/test_dashboard.js` (runs the dashboard script in a stub DOM and
+asserts the request table + charts build from schema-v10 records).
 
 1. **Start the dashboard** (in a terminal):
    ```bash
@@ -100,16 +117,25 @@ Automated tests (no ninfer needed): `python3 tests/test_console_parse.py`,
    5 s. A prompt that exceeds `--max-context` produces a red `REJECT` line
    with the HTTP code and message. Hover any line for the raw JSON record.
 
-4. **Stop**: click **Stop** (or from the tray in M3). Header goes to
+4. **Requests & Metrics tabs** (M2): with traffic running, the **Requests**
+   tab lists each request as a row — status badge (active/done/rejected/
+   error), protocol, prompt/gen tokens, finish reason, ttft, prefill &
+   decode tok/s, wall, prefix-cache hits, speculative acceptance. Click a
+   row to expand its raw start+done JSON. The **Metrics** tab shows two live
+   charts: *Throughput* (prefill + decode tok/s) and *Scheduler* (running /
+   prefilling / decode_ready / waiting + avg decode batch), plus a
+   current-values readout. Both update in real time from the same JSONL.
+
+5. **Stop**: click **Stop** (or from the tray in M3). Header goes to
    `STOPPED (exit 0)`; the child exited cleanly via SIGINT and the JSONL
    tailer thread shuts down with it.
 
-5. **Crash UX**: launch a profile whose binary fails (e.g. a profile whose
+6. **Crash UX**: launch a profile whose binary fails (e.g. a profile whose
    `binary` is a script that exits non-zero) — header shows `CRASHED` with
    the exit code; **Start** is enabled again. (stderr is still captured to
    `<run dir>/stderr.log` for diagnosis.)
 
-6. **Attach mode**: launch an instance *outside* ninfer-view (with
+7. **Attach mode**: launch an instance *outside* ninfer-view (with
    `--request-log-jsonl /tmp/your.jsonl`), then click **Attach** in the
    dashboard and point it at host/port + that file. Header shows `ATTACHED`
    with the endpoint and a live `health: up` chip; the log pane shows *new*
@@ -153,15 +179,16 @@ ninfer_view/
 ├── profiles.py       ~/.config/ninfer-view/profiles.json (+ NINFER_VIEW_HOME)
 └── httpd.py          ThreadingHTTPServer: REST + SSE + static dashboard
 web/
-└── index.html        single-file dashboard (no build step; JSONL formatters,
-                      attach form, health chip)
+└── index.html        single-file dashboard (no build step): JSONL formatters,
+                      attach form, health chip, request table + canvas charts
 tests/
 ├── fake_ninfer_serve.py      fake binary: real stderr + realistic JSONL
 ├── fake_external_instance.py fake external instance (health + JSONL writer)
 ├── test_console_parse.py     stderr parser tests
 ├── test_jsonl_tail.py        tailer tests (live append, partial lines,
 │                             seek_end, crashes)
-└── test_health.py            health poller tests
+├── test_health.py            health poller tests
+└── test_dashboard.js         dashboard script in a stub DOM (table + charts)
 ```
 
 ## Notes
@@ -186,6 +213,13 @@ tests/
 - **The log stream is JSONL-only.** The JSONL is the authoritative source
   (unrounded timings, full counters); the rounded stderr summaries are kept
   only for the state machine, the progress bar, and the `stderr.log` artifact
-  in each run dir. The M2 request table/charts will consume the same records.
+  in each run dir.
+- **M2 (table + charts) is computed in the browser** from the very same
+  records the log pane renders — there is no second server-side aggregate and
+  no extra endpoint. Throughput rates are `tokens / interval_seconds` (the
+  per-interval counters, not cumulative). Because it runs client-side, the
+  table/charts only cover records the browser has seen (the 4000-event
+  backfill ring + the live stream); refreshing the page re-backfills from
+  `/api/logs`.
 - `server_start` arrives only after the model is loaded (the child writes it
   at Engine attach), so the log pane is intentionally quiet while loading.

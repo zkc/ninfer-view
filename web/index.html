@@ -73,7 +73,20 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
 #health.up { color: var(--green); }
 #health.down { color: var(--red); }
 
-#logwrap { flex: 1; display: flex; flex-direction: column; min-height: 0;
+#tabbar { display: flex; gap: 4px; padding: 0 16px; background: var(--panel);
+  border-bottom: 1px solid var(--border); }
+.tab { font: inherit; font-size: 13px; font-weight: 600; padding: 8px 18px;
+  border: 1px solid transparent; border-bottom: none; background: transparent;
+  color: var(--dim); cursor: pointer; border-radius: 7px 7px 0 0; }
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--bg); color: var(--text);
+  border-color: var(--border); }
+.tab .pill { display: inline-block; margin-left: 7px; padding: 0 7px;
+  font-size: 11px; line-height: 16px; border-radius: 8px; background: #21262d;
+  color: var(--dim); }
+
+#logwrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column;
   padding: 10px 16px 14px; gap: 8px; }
 #logbar { display: flex; gap: 10px; align-items: center; }
 #filter {
@@ -102,6 +115,37 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
 #log .k-reject .label, #log .k-error .label { color: var(--red); }
 #log .k-thru .msg { color: var(--dim); }
 #log .empty { color: #484f58; font-style: italic; }
+
+/* ---- requests table ---- */
+#reqbar { display: flex; gap: 10px; align-items: center; }
+#reqFilter { flex: 0 1 260px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); padding: 5px 10px; font: 12px var(--mono); }
+.tblwrap { flex: 1; overflow: auto; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); }
+table { width: 100%; border-collapse: collapse; font: 12px/1.5 var(--mono); }
+thead th { position: sticky; top: 0; background: var(--panel); color: var(--dim);
+  text-align: left; padding: 6px 8px; font-weight: 600; white-space: nowrap; z-index: 1; }
+tbody td { padding: 5px 8px; border-top: 1px solid #21262d; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr.main { cursor: pointer; }
+tbody tr.main:hover { background: #161b22; }
+tbody tr.detail td { background: #0a0d12; white-space: pre-wrap; word-break: break-all;
+  color: var(--dim); font-size: 11px; padding: 8px 10px; border-top: none; }
+.st { font-weight: 700; font-size: 10px; letter-spacing: .05em; padding: 2px 8px;
+  border-radius: 10px; text-transform: uppercase; }
+.st.done { background: #23863633; color: var(--green); }
+.st.active { background: #1f6feb33; color: var(--accent); }
+.st.rejected, .st.error { background: #f8514933; color: var(--red); }
+.empty { color: #484f58; font-style: italic; }
+
+/* ---- metrics charts ---- */
+#metricsBar { display: flex; gap: 10px; align-items: center; }
+.chartcol { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.chartbox { flex: 1; min-height: 140px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); padding: 8px 10px;
+  display: flex; flex-direction: column; }
+.charttitle { color: var(--dim); font-size: 12px; margin-bottom: 4px; }
+.chartbox canvas { flex: 1; width: 100%; height: 100%; display: block; }
 </style>
 </head>
 <body>
@@ -137,15 +181,59 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
   <div class="bar"><i id="progFill"></i></div>
 </div>
 
+<div id="tabbar">
+  <button class="tab active" data-tab="log">Log</button>
+  <button class="tab" data-tab="requests">Requests <span class="pill" id="reqPill">0</span></button>
+  <button class="tab" data-tab="metrics">Metrics</button>
+</div>
+
 <div id="logwrap">
-  <div id="logbar">
-    <span class="hint">log &middot; requests.jsonl (live)</span>
-    <input id="filter" placeholder="filter log&hellip;" autocomplete="off" spellcheck="false">
-    <span class="hint" id="count">0 events</span>
-    <span class="spacer"></span>
-    <span class="hint" id="runDir"></span>
+  <div id="pane-log" class="pane">
+    <div id="logbar">
+      <span class="hint">log &middot; requests.jsonl (live)</span>
+      <input id="filter" placeholder="filter log&hellip;" autocomplete="off" spellcheck="false">
+      <span class="hint" id="count">0 events</span>
+      <span class="spacer"></span>
+      <span class="hint" id="runDir"></span>
+    </div>
+    <div id="log"></div>
   </div>
-  <div id="log"></div>
+
+  <div id="pane-requests" class="pane" style="display:none">
+    <div id="reqbar">
+      <span class="hint">requests &middot; start&rarr;done/reject/error</span>
+      <input id="reqFilter" placeholder="filter requests&hellip;" autocomplete="off" spellcheck="false">
+      <span class="spacer"></span>
+      <span class="hint" id="reqSummary"></span>
+    </div>
+    <div class="tblwrap">
+      <table id="reqTable">
+        <thead><tr>
+          <th>#</th><th>status</th><th>proto</th><th>started</th>
+          <th class="num">prompt</th><th class="num">gen</th><th>finish</th>
+          <th class="num">ttft</th><th class="num">prefill</th><th class="num">decode</th>
+          <th class="num">wall</th><th class="num">cache</th><th class="num">spec</th>
+        </tr></thead>
+        <tbody id="reqBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="pane-metrics" class="pane" style="display:none">
+    <div id="metricsBar">
+      <span class="hint" id="curTput">no throughput data yet</span>
+    </div>
+    <div class="chartcol">
+      <div class="chartbox">
+        <div class="charttitle">Throughput <span style="color:#484f58">tok/s</span></div>
+        <canvas id="chartTput"></canvas>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle">Scheduler queue + avg decode batch</div>
+        <canvas id="chartSched"></canvas>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -165,6 +253,68 @@ let lastState = { state: "stopped" };
 logEl.addEventListener("scroll", () => {
   pinned = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
 });
+
+// ---- M2 model: request table + throughput series ------------------------
+// Both aggregate the SAME records the log pane consumes (backfill + SSE), so
+// the server stays stateless. Idempotent: re-ingesting a record (e.g. after an
+// SSE reconnect re-backfill) cannot double-count.
+const reqs = new Map();   // request_id -> {id,status,start,startMs,done?,doneMs?}
+const tput = new Map();   // timestamp_ms -> point (dedupes re-ingested samples)
+const TP_MAX = 4000;
+let reqDirty = false, chartDirty = false, rafPending = false;
+
+function markReq()   { reqDirty = true;   scheduleRender(); }
+function markChart() { chartDirty = true; scheduleRender(); }
+function scheduleRender() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    if (reqDirty)   { reqDirty = false;   renderTable(); }
+    if (chartDirty) { chartDirty = false; renderCharts(); }
+  });
+}
+
+function ingest(rec) {
+  const ev = rec.event, ts = rec.timestamp_unix_ms || Date.now();
+  if (ev === "request_start") {
+    const id = rec.request && rec.request.request_id;
+    if (id != null && !reqs.has(id))
+      reqs.set(id, { id, status: "active", start: rec, startMs: ts });
+    markReq();
+  } else if (ev === "request_done" || ev === "request_rejected"
+             || ev === "request_error") {
+    const id = rec.request && rec.request.request_id;
+    if (id == null) return;
+    const r = reqs.get(id) || { id, status: "active", start: rec, startMs: ts };
+    r.status = ev === "request_done" ? "done"
+             : ev === "request_rejected" ? "rejected" : "error";
+    r.done = rec; r.doneMs = ts;
+    reqs.set(id, r);
+    markReq();
+  } else if (ev === "throughput") {
+    const tk = rec.tokens || {}, iv = rec.interval_seconds || 0,
+          tp = rec.throughput_tokens_per_second || {},
+          s = rec.scheduler || {}, b = rec.decode_batch || {};
+    // rate = tokens / interval (authoritative; equals the server's own field)
+    tput.set(ts, {
+      t: ts,
+      pfill: iv > 0 && tk.computed_prefill != null
+             ? tk.computed_prefill / iv : (tp.prefill != null ? tp.prefill : null),
+      dec:   iv > 0 && tk.committed_decode != null
+             ? tk.committed_decode / iv : (tp.decode != null ? tp.decode : null),
+      running: s.running, prefilling: s.prefilling,
+      decode_ready: s.decode_ready, waiting: s.waiting,
+      batch: b.average_size,
+    });
+    if (tput.size > TP_MAX) {
+      let oldest = Infinity;
+      for (const k of tput.keys()) if (k < oldest) oldest = k;
+      tput.delete(oldest);
+    }
+    markChart();
+  }
+}
 
 // ---- formatters (schema v10) ------------------------------------------
 
@@ -340,6 +490,210 @@ function addEntry(e) {
   $("count").textContent = entries.length + " events";
 }
 
+// ---- M2: request table ---------------------------------------------------
+
+function specCell(sp) {
+  if (!sp || !sp.backend || sp.backend === "none" || !(sp.rounds > 0)) return "\u2014";
+  const per = 1 + (sp.accepted_tokens || 0) / sp.rounds;
+  return per.toFixed(2) + (sp.drafted_tokens > 0
+    ? " (" + (100 * sp.accepted_tokens / sp.drafted_tokens).toFixed(1) + "%)" : "");
+}
+
+function reqRow(r) {
+  const d = r.done, res = (d && d.result) || {}, t = (d && d.timings_seconds) || {},
+        sp = (d && d.speculative) || {}, q = (r.start && r.start.request) || {};
+  const gen = res.completion_tokens || 0;
+  const decodeTok = gen > 0 ? gen - 1 : 0;
+  const frag = document.createDocumentFragment();
+  const tr = document.createElement("tr"); tr.className = "main";
+  const cell = (txt, cls) => {
+    const td = document.createElement("td");
+    td.textContent = txt; if (cls) td.className = cls; tr.appendChild(td); return td;
+  };
+  cell("#" + r.id);
+  cell(r.status, "st " + r.status);
+  cell(q.protocol || "?");
+  cell(r.startMs ? tsOf(r.startMs) : "\u2014");
+  cell(res.prompt_tokens != null ? String(res.prompt_tokens) : "\u2014", "num");
+  cell(r.status === "active" ? "\u2014" : String(gen), "num");
+  let finish = "\u2014";
+  if (r.status === "done") finish = res.finish_reason || "\u2014";
+  else if (r.status === "rejected") { const e = (r.done && r.done.error) || {}; finish = e.code || e.type || "rejected"; }
+  else if (r.status === "error")    { const e = (r.done && r.done.error) || {}; finish = e.code || e.type || "error"; }
+  cell(finish);
+  cell(r.status === "done" ? ((t.ttft || 0) * 1000).toFixed(0) + "ms" : "\u2014", "num");
+  cell(r.status === "done" ? rate(res.computed_prefill_tokens, t.prefill) : "\u2014", "num");
+  cell(r.status === "done" ? rate(decodeTok, t.decode) : "\u2014", "num");
+  cell(r.status === "done" ? f2(t.total) + "s" : "\u2014", "num");
+  cell(r.status === "done" ? String(res.prefix_cache_hit_tokens || 0) : "\u2014", "num");
+  cell(r.status === "done" ? specCell(sp) : "\u2014", "num");
+  // expandable raw-record row
+  const det = document.createElement("tr"); det.className = "detail";
+  det.style.display = "none";
+  const dtd = document.createElement("td"); dtd.colSpan = 13;
+  dtd.textContent =
+    "start: " + JSON.stringify(r.start || null) + "\ndone: " + JSON.stringify(d || null);
+  det.appendChild(dtd);
+  tr.addEventListener("click", () => {
+    det.style.display = det.style.display === "none" ? "" : "none";
+  });
+  frag.append(tr, det);
+  return frag;
+}
+
+function renderTable() {
+  const body = $("reqBody");
+  const f = ($("reqFilter").value || "").trim().toLowerCase();
+  const all = [...reqs.values()].sort((a, b) => (b.startMs || 0) - (a.startMs || 0));
+  const MAXSHOW = 500;
+  let rows = all.slice(0, MAXSHOW);
+  if (f) rows = rows.filter((r) => {
+    const q = (r.start && r.start.request) || {}, res = (r.done && r.done.result) || {};
+    const hay = (r.id + " " + (q.protocol || "") + " " + (res.finish_reason || "") + " " + r.status)
+      .toLowerCase();
+    return hay.includes(f);
+  });
+  let nDone = 0, nAct = 0, nRej = 0, nErr = 0;
+  for (const r of all) {
+    if (r.status === "done") nDone++;
+    else if (r.status === "active") nAct++;
+    else if (r.status === "rejected") nRej++;
+    else nErr++;
+  }
+  body.textContent = "";
+  const frag = document.createDocumentFragment();
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td"); td.colSpan = 13; td.className = "empty";
+    td.textContent = reqs.size === 0
+      ? "\u2014 no requests yet \u2014" : "\u2014 no requests match the filter \u2014";
+    tr.appendChild(td); frag.appendChild(tr);
+  } else {
+    for (const r of rows) frag.appendChild(reqRow(r));
+  }
+  body.appendChild(frag);
+  $("reqPill").textContent = String(all.length);
+  $("reqSummary").textContent =
+    "done " + nDone + " \u00b7 active " + nAct + " \u00b7 rejected " + nRej +
+    " \u00b7 error " + nErr + (all.length > MAXSHOW ? " \u00b7 latest " + MAXSHOW + " of " + all.length : "");
+}
+
+// ---- M2: metrics charts (no build step, plain canvas) ---------------------
+
+function tsShort(ms) {
+  const d = new Date(ms), p = (n) => String(n).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+function sizeCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || cv.parentElement.clientWidth || 400;
+  const h = cv.clientHeight || 200;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function drawChart(cv, o) {
+  const { ctx, w, h } = sizeCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 46, padR = 10, padT = 12, padB = 20;
+  const pw = w - padL - padR, ph = h - padT - padB;
+  if (pw < 20 || ph < 20) return;
+  const { xMin, xMax } = o;
+  if (xMin == null || xMax == null || xMax <= xMin) {
+    ctx.fillStyle = "#484f58"; ctx.font = "12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("no data yet", padL, h / 2);
+    return;
+  }
+  const yMin = o.yMin != null ? o.yMin : 0;
+  let yMax = o.yMax;
+  if (yMax == null) {
+    let m = 0;
+    for (const s of o.series) for (const p of s.pts)
+      if (p[1] != null && p[1] > m) m = p[1];
+    yMax = m <= 0 ? 1 : m * 1.12;
+  }
+  const X = (x) => padL + (x - xMin) / (xMax - xMin) * pw;
+  const Y = (y) => padT + ph - (y - yMin) / (yMax - yMin) * ph;
+  // grid + y labels
+  ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.font = "10px monospace";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const yv = yMin + (yMax - yMin) * i / 4, yy = Y(yv);
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+    ctx.fillStyle = "#8b949e";
+    ctx.fillText(o.yFmt ? o.yFmt(yv) : String(Math.round(yv)), padL - 6, yy + 3);
+  }
+  // x labels
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 4; i++) {
+    const xv = xMin + (xMax - xMin) * i / 4;
+    ctx.fillStyle = "#8b949e";
+    ctx.fillText(o.xFmt ? o.xFmt(xv) : "", X(xv), h - 6);
+  }
+  // series
+  for (const s of o.series) {
+    if (!s.pts.length) continue;
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
+    ctx.setLineDash(s.dashed ? [4, 3] : []);
+    ctx.beginPath();
+    let started = false;
+    for (const p of s.pts) {
+      if (p[1] == null) { started = false; continue; }
+      const xx = X(p[0]), yy = Y(p[1]);
+      if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  // legend
+  ctx.font = "10px monospace"; ctx.textAlign = "left";
+  let lx = padL + 6, ly = padT + 9;
+  for (const s of o.series) {
+    ctx.fillStyle = s.color; ctx.fillRect(lx, ly - 7, 11, 3);
+    ctx.fillStyle = "#8b949e"; ctx.fillText(s.name, lx + 15, ly);
+    lx += 15 + ctx.measureText(s.name).width + 14;
+  }
+}
+
+function renderCharts() {
+  const pts = [...tput.values()].sort((a, b) => a.t - b.t);
+  if (!pts.length) {
+    $("curTput").textContent = "no throughput data yet";
+    drawChart($("chartTput"), { series: [], xMin: null, xMax: null });
+    drawChart($("chartSched"), { series: [], xMin: null, xMax: null });
+    return;
+  }
+  const last = pts[pts.length - 1];
+  $("curTput").textContent =
+    "live \u00b7 prefill " + f1(last.pfill) + " tok/s \u00b7 decode " + f1(last.dec) +
+    " tok/s \u00b7 running " + (last.running != null ? last.running : 0) +
+    " \u00b7 waiting " + (last.waiting != null ? last.waiting : 0) +
+    " \u00b7 batch " + f2(last.batch);
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const span = Math.max(1000, t1 - t0);
+  const xMin = t0, xMax = t1 + span * 0.02;
+  drawChart($("chartTput"), {
+    xMin, xMax, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    series: [
+      { name: "prefill", color: "#d29922", pts: pts.map((p) => [p.t, p.pfill]) },
+      { name: "decode",  color: "#3fb950", pts: pts.map((p) => [p.t, p.dec]) },
+    ],
+  });
+  drawChart($("chartSched"), {
+    xMin, xMax, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
+    series: [
+      { name: "running",      color: "#3fb950", pts: pts.map((p) => [p.t, p.running]) },
+      { name: "prefilling",   color: "#d29922", pts: pts.map((p) => [p.t, p.prefilling]) },
+      { name: "decode_ready", color: "#58a6ff", pts: pts.map((p) => [p.t, p.decode_ready]) },
+      { name: "waiting",      color: "#f85149", pts: pts.map((p) => [p.t, p.waiting]) },
+      { name: "avg batch",    color: "#d2a8ff", pts: pts.map((p) => [p.t, p.batch]), dashed: true },
+    ],
+  });
+}
+
 // ---- state header ---------------------------------------------------------
 
 function fmtUp(s) {
@@ -419,14 +773,15 @@ function connect() {
     es.addEventListener(kind, (ev) => {
       const d = JSON.parse(ev.data);
       addEntry(makeEntry(d.record));
+      ingest(d.record);
     });
   }
   es.addEventListener("error", () => {
-    // EventSource reconnects on its own; re-backfill history on failure.
+    // EventSource reconnects on its own; re-backfill history on failure
+    // (ingest is idempotent, so re-feeding the model is safe).
     fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
       entries.length = 0;
-      for (const e of d.logs) entries.push(makeEntry(e.record));
-      applyFilter();
+      backfill(d);
     }).catch(() => {});
   });
 }
@@ -465,13 +820,36 @@ $("attGo").onclick = async () => {
   attachForm.style.display = "none";
 };
 $("filter").addEventListener("input", applyFilter);
+$("reqFilter").addEventListener("input", renderTable);
+
+// Tab switching (charts re-render on show so the canvas gets real dimensions).
+document.querySelectorAll(".tab").forEach((t) => {
+  t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    const name = t.dataset.tab;
+    ["log", "requests", "metrics"].forEach((p) => {
+      $("pane-" + p).style.display = (p === name) ? "flex" : "none";
+    });
+    if (name === "metrics") renderCharts();
+    if (name === "requests") renderTable();
+    if (name === "log" && pinned) logEl.scrollTop = logEl.scrollHeight;
+  });
+});
+window.addEventListener("resize", () => {
+  if ($("pane-metrics").style.display !== "none") renderCharts();
+});
 
 // Backfill + initial state, then go live.
-fetch("/api/state").then((r) => r.json()).then(applyState).catch(() => {});
-fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
-  for (const e of d.logs) entries.push(makeEntry(e.record));
+function backfill(d) {
+  for (const e of d.logs) { entries.push(makeEntry(e.record)); ingest(e.record); }
+  if (entries.length > MAX) entries.splice(0, entries.length - MAX);
   applyFilter();
-}).catch(() => {});
+  renderTable();
+  renderCharts();
+}
+fetch("/api/state").then((r) => r.json()).then(applyState).catch(() => {});
+fetch("/api/logs?limit=2000").then((r) => r.json()).then(backfill).catch(() => {});
 setInterval(tick, 1000);
 connect();
 </script>
