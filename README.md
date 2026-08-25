@@ -5,22 +5,33 @@ a dashboard (browser) plus — in a later milestone — a GNOME top-bar tray ico
 
 See `PROPOSAL.md` for the full design and milestone plan.
 
-## Status: M0 (spike) complete
+## Status: M0 + M1 (JSONL log stream) complete
 
-M0 delivers the vertical slice: profile → spawn → live log view → clean stop.
+M0 delivered the vertical slice: profile → spawn → live view → clean stop.
+M1 (JSONL part) makes the **log stream fed only by the child's
+`--request-log-jsonl` file** (schema v10) — the authoritative, unrounded
+source per `docs/serving.md`.
 
-- `GET /` — dashboard (status header, load progress bar, live console)
+- `GET /` — dashboard (status header, load progress bar, live log pane)
 - `POST /api/start` / `POST /api/stop` — launch / SIGINT-stop the child
-- `GET /api/state`, `GET /api/logs` — snapshot + console backfill
-- `GET /api/stream` — SSE push of state changes and every console event
-- stderr parser understands the lifecycle lines, load-progress lines, and tags
-  request/throughput activity lines (verified against the exact formats in
-  `apps/serve/main.cpp`, `src/serve/request_log.cpp`, `src/product/load_progress/`)
+  (serialized by a dedicated action lock)
+- `GET /api/state` — snapshot; `GET /api/logs` — JSONL backfill
+- `GET /api/stream` — SSE: `state` plus the six schema-v10 events
+  (`server_start`, `request_start`, `request_rejected`, `request_done`,
+  `request_error`, `throughput`)
+- **JSONL tailer** (`jsonl_tail.py`): append-follower on the per-run
+  `requests.jsonl` (poll-and-read; the server flushes per event). Malformed /
+  non-ninfer lines are skipped and counted; consumer exceptions can't kill it.
+- The log pane renders one readable line per record, colored by type
+  (rejected/error red, request-start blue, throughput dim, server_start
+  purple); **hover a line for the full raw record**.
+- stderr is still parsed, but *only* to drive the state machine and the
+  load-progress bar; stderr lines no longer enter the log stream or backfill.
 - fresh per-run dir under `~/.local/state/ninfer-view/runs/<ts>/` with
-  `argv.txt`, `stderr.log`, and the injected `--request-log-jsonl` file
+  `argv.txt`, `stderr.log`, and the injected `requests.jsonl`
 
-Not yet in (M1+): JSONL request table & charts, attach mode for external
-instances, `/health` poller, tray icon, config drawer in the UI.
+Not yet in (rest of M1/M2+): JSONL request table & charts, attach mode for
+external instances, `/health` poller, tray icon, config drawer in the UI.
 
 ## Run
 
@@ -32,9 +43,9 @@ python3 -m ninfer_view --port 19000   # different port
 
 No dependencies — Python 3.12+ stdlib only.
 
-The default profile launches your known-good instance
-(`~/.config/ninfer-view/profile.json` is consulted first if present — a JSON
-object merged over the built-in defaults):
+The default profile launches your known-good instance. Saved profiles live in
+`~/.config/ninfer-view/profiles.json` (a `{"profiles": {id: {...}}}` map);
+the built-in default is always present:
 
 ```
 /home/kyle/ninfer/build/apps/ninfer-serve
@@ -51,7 +62,10 @@ Environment override: `NINFER_VIEW_HOME=/some/dir` redirects both the config
 dir (`$NINFER_VIEW_HOME/profiles.json`) and the run dirs
 (`$NINFER_VIEW_HOME/runs/`).
 
-## Testing M0 (manual checklist)
+## Testing (manual checklist)
+
+Automated tests (no ninfer needed): `python3 tests/test_console_parse.py` and
+`python3 tests/test_jsonl_tail.py`.
 
 1. **Start the dashboard** (in a terminal):
    ```bash
@@ -63,28 +77,35 @@ dir (`$NINFER_VIEW_HOME/profiles.json`) and the run dirs
    - Header should move `STARTING → LOADING`, the progress bar should fill
      from the model-load lines (phase / % / GiB / elapsed), then `WARMING`,
      then `RUNNING` with the model id, endpoint, and live uptime.
-   - The console pane streams every stderr line live.
+   - The log pane stays quiet until the model is loaded: `server_start`
+     (purple) appears once — that's the child's JSONL, not its stderr.
    - Verify `curl http://127.0.0.1:8081/health` → `{"status":"ok"}`.
    - The run dir appeared under `~/.local/state/ninfer-view/runs/` with
      `requests.jsonl` + `stderr.log`.
 
 3. **Generate traffic** (optional): `curl` a `/v1/chat/completions` request
-   against 8081 — the `[req N] … → submitted` and `done …` lines should show
-   up live in the console (blue-tinted activity lines), as should the
-   `throughput …` lines every 5 s.
+   against 8081 — the log pane shows a blue `START` line when it's admitted
+   and a `DONE` line with unrounded `ttft`/`prefill`/`decode`/`wall` and the
+   speculative acceptance rate when it completes, plus dim `THRU` lines every
+   5 s. A prompt that exceeds `--max-context` produces a red `REJECT` line
+   with the HTTP code and message. Hover any line for the raw JSON record.
 
-4. **Stop**: click **Stop** (or from the tray in M3). Header goes
-   `STOPPING → STOPPED (exit 0)`; the child exited cleanly via SIGINT.
+4. **Stop**: click **Stop** (or from the tray in M3). Header goes to
+   `STOPPED (exit 0)`; the child exited cleanly via SIGINT and the JSONL
+   tailer thread shuts down with it.
 
-5. **Crash UX**: launch a profile whose binary fails (e.g. stop any existing
-   8081 instance first, then change the port in the profile to a taken port) —
-   header shows `CRASHED` with the exit code; the last stderr lines (including
-   `failed to bind …`) remain visible; **Start** is enabled again.
+5. **Crash UX**: launch a profile whose binary fails (e.g. a profile whose
+   `binary` is a script that exits non-zero) — header shows `CRASHED` with
+   the exit code; **Start** is enabled again. (stderr is still captured to
+   `<run dir>/stderr.log` for diagnosis.)
 
 ### Test without loading the real model (~30 s instead of minutes)
 
-A fake binary that mimics the exact stderr lifecycle lives in the repo at
-`tests/fake_ninfer_serve.py`. In a browser console on the dashboard:
+A fake binary that mimics the real stderr lifecycle **and emits realistic
+schema-v10 JSONL** (server_start, request_start, request_done,
+request_rejected, throughput — it reads `--request-log-jsonl` from its own
+argv) lives in the repo at `tests/fake_ninfer_serve.py`. In a browser console
+on the dashboard:
 
 ```js
 fetch("/api/profiles", {method: "POST", headers: {"Content-Type": "application/json"},
@@ -93,23 +114,29 @@ fetch("/api/profiles", {method: "POST", headers: {"Content-Type": "application/j
     artifact: "/dev/null", host: "127.0.0.1", port: 8099}})})
 ```
 
-Then start with that profile (the UI currently starts `default`; for M0 use
+Then start with that profile (the UI currently starts `default`; use
 `curl -X POST http://127.0.0.1:18080/api/start -d '{"profile_id":"fake"}'`).
-You get the full lifecycle — progress bar, warming, running, activity lines —
-in about 8 seconds, and a clean SIGINT stop.
+You get the full lifecycle — progress bar, the purple `server_start` line,
+blue/red/dim request lines, `THRU` every 5 s — in about 8 seconds, and a
+clean SIGINT stop.
 
 ## Layout
 
 ```
 ninfer_view/
 ├── __main__.py       CLI entry: python3 -m ninfer_view
-├── console_parse.py  stderr line → typed event (lifecycle/progress/activity)
-├── state.py          EventBus (SSE fan-out + ring buffer) + state machine
+├── console_parse.py  stderr line → typed event (drives state machine only)
+├── jsonl_tail.py     append-follower for requests.jsonl (schema v10)
+├── state.py          EventBus (SSE fan-out + JSONL ring buffer) + state machine
 ├── supervisor.py     spawn child, tee stderr, SIGINT stop, exit watch
 ├── profiles.py       ~/.config/ninfer-view/profiles.json (+ NINFER_VIEW_HOME)
 └── httpd.py          ThreadingHTTPServer: REST + SSE + static dashboard
 web/
-└── index.html        single-file dashboard (no build step)
+└── index.html        single-file dashboard (no build step; JSONL formatters)
+tests/
+├── fake_ninfer_serve.py    fake binary: real stderr + realistic JSONL
+├── test_console_parse.py   stderr parser tests
+└── test_jsonl_tail.py      tailer tests (live append, partial lines, crashes)
 ```
 
 ## Notes
@@ -128,5 +155,9 @@ web/
   spawn two children.
 - One supervised instance per daemon (v1). Profiles make switching
   artifact/port instant; multi-instance is a v2 extension.
-- The JSONL written by the child is the authoritative source for the M2
-  request table/charts; M0 consumes it only by giving it a fresh file.
+- **The log stream is JSONL-only.** The JSONL is the authoritative source
+  (unrounded timings, full counters); the rounded stderr summaries are kept
+  only for the state machine, the progress bar, and the `stderr.log` artifact
+  in each run dir. The M2 request table/charts will consume the same records.
+- `server_start` arrives only after the model is loaded (the child writes it
+  at Engine attach), so the log pane is intentionally quiet while loading.

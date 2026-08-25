@@ -1,9 +1,14 @@
 """Event bus + service state machine for ninfer-view.
 
 The Service is the single object the HTTP layer talks to. It owns the
-supervisor (child process), the state machine, and an EventBus that fans out
-events to SSE subscribers and keeps a ring buffer of console events for
-backfill.
+supervisor (child process), the JSONL tailer, the state machine, and an
+EventBus that fans out events to SSE subscribers and keeps a ring buffer of
+JSONL log events for backfill.
+
+Log stream: the dashboard's log stream is fed *only* by the child's
+``--request-log-jsonl`` file (schema v10). stderr is still parsed, but solely
+to drive the state machine and load-progress bar; stderr lines never enter
+the SSE log stream or the log backfill buffer.
 
 State flow:
     stopped -> starting -> loading -> warming -> running
@@ -19,11 +24,13 @@ import queue
 import threading
 import time
 
-CONSOLE_KINDS = ("console", "lifecycle", "progress", "activity")
+# schema-v10 event types; these are the kinds that populate the log stream.
+LOG_KINDS = ("server_start", "request_start", "request_rejected",
+             "request_done", "request_error", "throughput")
 
 
 class EventBus:
-    """Fan-out to SSE subscribers + ring buffer of console events."""
+    """Fan-out to SSE subscribers + ring buffer of JSONL log events."""
 
     def __init__(self, log_limit: int = 4000):
         self._lock = threading.Lock()
@@ -46,7 +53,7 @@ class EventBus:
     def publish(self, event: dict) -> None:
         event = dict(event)
         event["seq"] = next(self._seq)
-        if event.get("kind") in CONSOLE_KINDS:
+        if event.get("kind") in LOG_KINDS:
             with self._lock:
                 self._logs.append(event)
                 if len(self._logs) > self._log_limit:
@@ -86,6 +93,7 @@ class Service:
         self.run_dir: str | None = None
         self.pid: int | None = None
         self.supervisor = None
+        self.jsonl_tailer = None
 
     # -- actions ---------------------------------------------------------
 
@@ -112,6 +120,7 @@ class Service:
             self.error = None
             self.pid = None
             self.supervisor = Supervisor(self)
+            self.jsonl_tailer = None
             ok, msg = self.supervisor.start(profile)
             if not ok:
                 self.supervisor = None
@@ -119,6 +128,10 @@ class Service:
             self.started_at = time.time()
             self.run_dir = str(self.supervisor.run_dir)
             self.pid = self.supervisor.pid
+            from .jsonl_tail import JsonlTailer
+            self.jsonl_tailer = JsonlTailer(self.supervisor.jsonl_path,
+                                            self._on_jsonl_event)
+            self.jsonl_tailer.start()
             self._set_state("starting")
             return True, None
 
@@ -136,11 +149,16 @@ class Service:
     # -- callbacks from the supervisor -----------------------------------
 
     def on_console_event(self, ev: dict) -> None:
+        """stderr-driven state/progress only — never enters the log stream."""
         kind = ev["kind"]
         if kind == "progress":
             self.progress = ev["progress"]
             if self.state == "starting":
                 self._set_state("loading")
+            else:
+                # No state change, but push a snapshot so the progress bar
+                # advances between the 10-second progress lines.
+                self.bus.publish({"kind": "state", **self.snapshot()})
         elif kind == "lifecycle":
             phase = ev.get("phase")
             if phase == "loading" and self.state == "starting":
@@ -152,9 +170,15 @@ class Service:
                 self.endpoint = ev.get("endpoint")
                 self.running_at = time.time()
                 self._set_state("running")
-        self.bus.publish(ev)
+
+    def _on_jsonl_event(self, rec: dict) -> None:
+        """One parsed schema-v10 record from the tailer -> log stream."""
+        self.bus.publish({"kind": rec.get("event", "unknown"), "record": rec})
 
     def on_child_exit(self, code: int, stopping: bool) -> None:
+        if self.jsonl_tailer is not None:
+            self.jsonl_tailer.stop()
+            self.jsonl_tailer = None
         self.pid = None
         if stopping or code == 0:
             self._set_state("stopped", exit_code=code)

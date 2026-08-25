@@ -3,12 +3,16 @@
 Routes (bound to 127.0.0.1 only; local tool, no auth):
     GET  /                dashboard (web/index.html)
     GET  /api/state       state snapshot
-    GET  /api/logs        recent console events (backfill)
+    GET  /api/logs        recent JSONL log events (backfill)
     GET  /api/profiles    saved launch profiles
     POST /api/profiles    upsert a profile
     POST /api/start       {profile_id}
     POST /api/stop
-    GET  /api/stream      SSE: state | console | lifecycle | progress | activity
+    GET  /api/stream      SSE: state | server_start | request_start |
+                           request_rejected | request_done | request_error |
+                           throughput
+Log stream: the /api/logs and /api/stream log events come only from the
+child's --request-log-jsonl file (schema v10); stderr never enters them.
 """
 
 from __future__ import annotations

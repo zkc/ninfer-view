@@ -30,9 +30,9 @@ header {
 .badge .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
 .badge.running .dot { background: var(--green); animation: pulse 1.6s infinite; }
 .badge.running { color: var(--green); }
-.badge.starting .dot, .badge.loading .dot, .badge.warming .dot, .badge.stopping .dot {
+.badge.starting .dot, .badge.loading .dot, .badge.warming .dot {
   background: var(--amber); animation: pulse 1s infinite; }
-.badge.starting, .badge.loading, .badge.warming, .badge.stopping { color: var(--amber); }
+.badge.starting, .badge.loading, .badge.warming { color: var(--amber); }
 .badge.crashed .dot { background: var(--red); }
 .badge.crashed { color: var(--red); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
@@ -58,30 +58,35 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
 #progress .plabel { color: var(--dim); font-size: 12px;
   display: flex; gap: 18px; flex-wrap: wrap; }
 
-#consolewrap { flex: 1; display: flex; flex-direction: column; min-height: 0;
+#logwrap { flex: 1; display: flex; flex-direction: column; min-height: 0;
   padding: 10px 16px 14px; gap: 8px; }
-#consolebar { display: flex; gap: 10px; align-items: center; }
+#logbar { display: flex; gap: 10px; align-items: center; }
 #filter {
-  flex: 0 1 260px; background: var(--bg); border: 1px solid var(--border);
+  flex: 0 1 280px; background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; color: var(--text); padding: 5px 10px; font: 12px var(--mono);
 }
-#consolebar .hint { color: var(--dim); font-size: 12px; }
-#console {
+#logbar .hint { color: var(--dim); font-size: 12px; }
+#log {
   flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; padding: 8px 10px; font: 12px/1.5 var(--mono);
   white-space: pre-wrap; word-break: break-word;
 }
-#console .line { display: flex; gap: 8px; }
-#console .ts { color: #484f58; flex: 0 0 auto; }
-#console .lvl { flex: 0 0 56px; font-weight: 700; text-transform: uppercase;
-  font-size: 10px; letter-spacing: .05em; padding-top: 2px; }
-#console .msg { flex: 1; }
-#console .info .lvl { color: var(--dim); }
-#console .info .msg { color: var(--text); }
-#console .warning .lvl, #console .warning .msg { color: var(--amber); }
-#console .error .lvl, #console .error .msg { color: var(--red); }
-#console .activity .msg { color: #a5d6ff; }
-#console .lifecycle .msg { color: #d2a8ff; }
+#log .line { display: flex; gap: 8px; }
+#log .ts { color: #484f58; flex: 0 0 auto; }
+#log .label {
+  flex: 0 0 52px; font-weight: 700; text-transform: uppercase;
+  font-size: 10px; letter-spacing: .05em; padding-top: 2px; color: var(--dim);
+}
+#log .msg { flex: 1; }
+#log .k-server .msg { color: #d2a8ff; }
+#log .k-server .label { color: #d2a8ff; }
+#log .k-start .msg { color: #a5d6ff; }
+#log .k-start .label { color: #a5d6ff; }
+#log .k-done .msg { color: var(--text); }
+#log .k-reject .msg, #log .k-error .msg { color: var(--red); }
+#log .k-reject .label, #log .k-error .label { color: var(--red); }
+#log .k-thru .msg { color: var(--dim); }
+#log .empty { color: #484f58; font-style: italic; }
 </style>
 </head>
 <body>
@@ -104,73 +109,210 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
   <div class="bar"><i id="progFill"></i></div>
 </div>
 
-<div id="consolewrap">
-  <div id="consolebar">
-    <input id="filter" placeholder="filter console&hellip;" autocomplete="off" spellcheck="false">
-    <span class="hint" id="count">0 lines</span>
+<div id="logwrap">
+  <div id="logbar">
+    <span class="hint">log &middot; requests.jsonl (live)</span>
+    <input id="filter" placeholder="filter log&hellip;" autocomplete="off" spellcheck="false">
+    <span class="hint" id="count">0 events</span>
     <span class="spacer"></span>
     <span class="hint" id="runDir"></span>
   </div>
-  <div id="console"></div>
+  <div id="log"></div>
 </div>
 
 <script>
 "use strict";
+/* The log stream is fed only by the child's --request-log-jsonl file
+ * (schema v10). stderr drives the state machine / progress bar only.
+ * Hover a line for the full raw record. */
 const $ = (id) => document.getElementById(id);
-const consoleEl = $("console"), badge = $("badge"), stateText = $("stateText");
+const logEl = $("log"), badge = $("badge"), stateText = $("stateText");
 const metaEl = $("meta"), uptimeEl = $("uptime"), progEl = $("progress");
 const startBtn = $("startBtn"), stopBtn = $("stopBtn");
-const entries = [];                       // {ts, level, message, kind}
+const entries = [];                       // {ts, kind, label, text, rec}
 const MAX = 4000;
 let pinned = true;
 let lastState = { state: "stopped" };
 
-consoleEl.addEventListener("scroll", () => {
-  pinned = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 40;
+logEl.addEventListener("scroll", () => {
+  pinned = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
 });
 
-const esc = (x) => String(x).replace(/[&<>"]/g,
-  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const timeOnly = (ts) => ts ? ts.slice(11) : "--:--:--.---";
+// ---- formatters (schema v10) ------------------------------------------
+
+const f0 = (x) => x == null ? "\u2014" : String(Math.round(Number(x)));
+const f1 = (x) => x == null ? "\u2014" : Number(x).toFixed(1);
+const f2 = (x) => x == null ? "\u2014" : Number(x).toFixed(2);
+const rate = (tok, s) => (tok > 0 && s > 0) ? (tok / s).toFixed(1) + "tok/s" : "n/a";
+const kb = (x) => x == null ? "\u2014"
+  : (x >= 1e6 ? (x / 1e6).toFixed(2) + "M" : Math.round(x / 1e3) + "k");
+
+function tsOf(ms) {
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds())
+       + "." + p(d.getMilliseconds(), 3);
+}
+
+function fmtServerStart(r) {
+  const s = r.server || {}, e = r.engine || {}, a = r.artifact || {},
+        env = r.environment || {};
+  const p = [
+    "model=" + (s.public_model_id || "\u2014"),
+    "http://" + s.host + ":" + s.port,
+    "ctx=" + f0(e.max_context),
+    "kv=" + e.kv_capacity_mode + " " + kb(e.kv_capacity) + " tok",
+    "conc=" + e.max_concurrency,
+    "kv_cache=" + (e.kv_cache || "\u2014"),
+  ];
+  if (e.speculative_backend && e.speculative_backend !== "none")
+    p.push("spec=" + e.speculative_backend + " draft=" + e.speculative_draft_window);
+  if (env.gpu_name) p.push(env.gpu_name);
+  if (a.load_seconds != null) p.push("load=" + f1(a.load_seconds) + "s");
+  p.push("instance=" + r.server_instance_id);
+  return p.join(" \u00b7 ");
+}
+
+function fmtRequestStart(r) {
+  const q = r.request || {}, pr = r.preparation_seconds || {};
+  const p = [
+    (q.protocol || "?") + " " + (q.stream ? "stream" : "non-stream"),
+    "thinking=" + (q.enable_thinking ? "on" : "off"),
+    "budget=" + q.requested_output_tokens +
+      "(" + (q.requested_output_tokens_source === "client" ? "client" : "default") + ")",
+  ];
+  if (q.message_count) p.push("msgs=" + q.message_count);
+  if (q.media_item_count) p.push("media=" + q.media_item_count);
+  if (q.tool_count) p.push("tools=" + q.tool_count);
+  if (pr.total > 0.001) p.push("prepare=" + (pr.total * 1000).toFixed(1) + "ms");
+  return p.join(" \u00b7 ");
+}
+
+function fmtRequestDone(r) {
+  const q = r.request || {}, res = r.result || {}, t = r.timings_seconds || {},
+        sp = r.speculative || {};
+  const gen = res.completion_tokens || 0;
+  const decodeTok = gen > 0 ? gen - 1 : 0;   // prefill emits the first token
+  const p = [
+    "done " + (res.finish_reason || "\u2014"),
+    "prompt=" + (res.prompt_tokens != null ? res.prompt_tokens : "\u2014"),
+    "gen=" + gen,
+    "cache=" + (res.prefix_cache_hit_tokens || 0),
+    "reuse=" + (res.prefix_reuse_path || "\u2014"),
+    "ttft=" + ((t.ttft || 0) * 1000).toFixed(0) + "ms",
+    "prefill=" + rate(res.computed_prefill_tokens, t.prefill),
+    "decode=" + rate(decodeTok, t.decode),
+    "wall=" + f2(t.total) + "s",
+  ];
+  if (res.tool_call_count) p.push("tool_calls=" + res.tool_call_count);
+  if (sp.backend && sp.backend !== "none" && sp.rounds > 0) {
+    const per = 1 + sp.accepted_tokens / sp.rounds;
+    const s = "spec=" + sp.backend + " " + per.toFixed(2) + "tok/round";
+    p.push(sp.drafted_tokens > 0
+      ? s + " (" + (100 * sp.accepted_tokens / sp.drafted_tokens).toFixed(1) + "%)"
+      : s);
+  }
+  return p.join(" \u00b7 ");
+}
+
+function fmtRequestRejected(r) {
+  const e = r.error || {};
+  return ("REJECTED " + (e.status != null ? e.status : "?") + " " +
+          (e.code || e.type || "") + " " + (e.message || "")).replace(/\s+/g, " ").trim();
+}
+
+function fmtRequestError(r) {
+  return "ERROR " + (r.error && r.error.message ? r.error.message : "unknown");
+}
+
+function fmtThroughput(r) {
+  const t = r.throughput_tokens_per_second || {}, s = r.scheduler || {},
+        b = r.decode_batch || {};
+  return "throughput " + f1(r.interval_seconds) + "s \u00b7 "
+    + "prefill=" + f1(t.prefill) + "tok/s decode=" + f1(t.decode) + "tok/s \u00b7 "
+    + "running=" + (s.running != null ? s.running : 0)
+    + " prefilling=" + (s.prefilling != null ? s.prefilling : 0)
+    + " decode_ready=" + (s.decode_ready != null ? s.decode_ready : 0)
+    + " waiting=" + (s.waiting != null ? s.waiting : 0) + " \u00b7 "
+    + "batch=" + (b.average_size != null ? f2(b.average_size) : "n/a");
+}
+
+const KIND_LABEL = {
+  server_start: "server", request_start: "start", request_rejected: "reject",
+  request_done: "done", request_error: "error", throughput: "thru",
+};
+const KIND_CLASS = {
+  server_start: "k-server", request_start: "k-start",
+  request_rejected: "k-reject", request_done: "k-done",
+  request_error: "k-error", throughput: "k-thru",
+};
+const FORMATTERS = {
+  server_start: fmtServerStart, request_start: fmtRequestStart,
+  request_rejected: fmtRequestRejected, request_done: fmtRequestDone,
+  request_error: fmtRequestError, throughput: fmtThroughput,
+};
+
+function makeEntry(rec) {
+  const kind = rec.event || "unknown";
+  const fmt = FORMATTERS[kind];
+  let text = fmt ? fmt(rec) : JSON.stringify(rec);
+  const id = rec.request && rec.request.request_id;
+  if (id != null && kind !== "server_start" && kind !== "throughput")
+    text = "[req " + id + "] " + text;
+  return { ts: rec.timestamp_unix_ms || Date.now(), kind,
+           label: KIND_LABEL[kind] || kind, text, rec };
+}
+
+// ---- log pane rendering -------------------------------------------------
 
 function lineNode(e) {
   const div = document.createElement("div");
-  const cls = e.level || "info";
-  div.className = "line " + cls + (e.kind ? " " + e.kind : "");
+  div.className = "line " + (KIND_CLASS[e.kind] || "");
   const ts = document.createElement("span"); ts.className = "ts";
-  ts.textContent = timeOnly(e.ts);
-  const lvl = document.createElement("span"); lvl.className = "lvl";
-  lvl.textContent = cls;
+  ts.textContent = tsOf(e.ts);
+  const label = document.createElement("span"); label.className = "label";
+  label.textContent = e.label;
   const msg = document.createElement("span"); msg.className = "msg";
-  msg.textContent = e.message;
-  div.append(ts, lvl, msg);
+  msg.textContent = e.text;
+  div.append(ts, label, msg);
+  div.title = "raw record:\n" + JSON.stringify(e.rec, null, 2);
   return div;
 }
 
 function applyFilter() {
   const f = $("filter").value.trim().toLowerCase();
-  consoleEl.textContent = "";
+  logEl.textContent = "";
   const frag = document.createDocumentFragment();
   let n = 0;
   for (const e of entries) {
-    if (f && !e.message.toLowerCase().includes(f)) continue;
+    if (f && !e.text.toLowerCase().includes(f)) continue;
     frag.appendChild(lineNode(e)); n++;
   }
-  consoleEl.appendChild(frag);
-  $("count").textContent = n + (n === 1 ? " line" : " lines");
-  if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+  if (n === 0) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = entries.length === 0
+      ? "\u2014 no events yet; the log stream is the instance's requests.jsonl \u2014"
+      : "\u2014 no events match the filter \u2014";
+    frag.appendChild(d);
+  }
+  logEl.appendChild(frag);
+  $("count").textContent = n + (n === 1 ? " event" : " events");
+  if (pinned) logEl.scrollTop = logEl.scrollHeight;
 }
 
 function addEntry(e) {
   entries.push(e);
   if (entries.length > MAX) entries.splice(0, entries.length - MAX);
   const f = $("filter").value.trim().toLowerCase();
-  if (!f || e.message.toLowerCase().includes(f)) {
-    consoleEl.appendChild(lineNode(e));
-    if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+  if (!f || e.text.toLowerCase().includes(f)) {
+    logEl.appendChild(lineNode(e));
+    if (pinned) logEl.scrollTop = logEl.scrollHeight;
   }
-  $("count").textContent = entries.length + " lines";
+  $("count").textContent = entries.length + " events";
 }
+
+// ---- state header ---------------------------------------------------------
 
 function fmtUp(s) {
   if (s == null) return "";
@@ -188,27 +330,26 @@ function applyState(s) {
   stopBtn.disabled = !["starting", "loading", "warming", "running"].includes(st);
 
   const bits = [];
-  if (lastState.model_id) bits.push("<b>" + esc(lastState.model_id) + "</b>");
-  if (lastState.endpoint) bits.push(esc(lastState.endpoint));
+  if (lastState.model_id) bits.push("<b>" + lastState.model_id + "</b>");
+  if (lastState.endpoint) bits.push(lastState.endpoint);
   if (lastState.pid != null) bits.push("pid " + lastState.pid);
   if (lastState.exit_code != null) bits.push("exit " + lastState.exit_code);
-  if (lastState.error) bits.push("⚠ " + esc(lastState.error));
-  metaEl.innerHTML = bits.length ? bits.join(" · ") : "no instance";
-  $("runDir").textContent = lastState.run_dir ? esc(lastState.run_dir) : "";
+  if (lastState.error) bits.push("\u26a0 " + lastState.error);
+  metaEl.innerHTML = bits.length ? bits.join(" \u00b7 ") : "no instance";
+  $("runDir").textContent = lastState.run_dir || "";
 
   if ((st === "loading" || st === "starting") && lastState.progress) {
     const p = lastState.progress;
     progEl.style.display = "block";
-    $("progPhase").textContent = "loading · " + (p.phase || "");
+    $("progPhase").textContent = "loading \u00b7 " + (p.phase || "");
     $("progPct").textContent = p.percent != null ? p.percent.toFixed(1) + "%" : "";
-    $("progBytes").textContent =
-      p.total ? p.done + " / " + p.total : (p.done || "");
+    $("progBytes").textContent = p.total ? p.done + " / " + p.total : (p.done || "");
     $("progElapsed").textContent =
       p.elapsed_s != null ? p.elapsed_s.toFixed(0) + " s elapsed" : "";
     $("progFill").style.width = (p.percent == null ? 4 : p.percent) + "%";
-  } else if (st === "warming" || st === "stopping") {
+  } else if (st === "warming") {
     progEl.style.display = "block";
-    $("progPhase").textContent = st === "warming" ? "warming up…" : "stopping…";
+    $("progPhase").textContent = "warming up\u2026";
     $("progPct").textContent = ""; $("progBytes").textContent = "";
     $("progElapsed").textContent = "";
     $("progFill").style.width = "100%";
@@ -229,17 +370,25 @@ function tick() {
   }
 }
 
+// ---- live stream -----------------------------------------------------------
+
+const LOG_KINDS = ["server_start", "request_start", "request_rejected",
+                   "request_done", "request_error", "throughput"];
+
 function connect() {
   const es = new EventSource("/api/stream");
   es.addEventListener("state", (ev) => { applyState(JSON.parse(ev.data)); tick(); });
-  for (const kind of ["console", "lifecycle", "progress", "activity"]) {
-    es.addEventListener(kind, (ev) => addEntry(JSON.parse(ev.data)));
+  for (const kind of LOG_KINDS) {
+    es.addEventListener(kind, (ev) => {
+      const d = JSON.parse(ev.data);
+      addEntry(makeEntry(d.record));
+    });
   }
   es.addEventListener("error", () => {
     // EventSource reconnects on its own; re-backfill history on failure.
     fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
       entries.length = 0;
-      for (const e of d.logs) entries.push(e);
+      for (const e of d.logs) entries.push(makeEntry(e.record));
       applyFilter();
     }).catch(() => {});
   });
@@ -263,7 +412,7 @@ $("filter").addEventListener("input", applyFilter);
 // Backfill + initial state, then go live.
 fetch("/api/state").then((r) => r.json()).then(applyState).catch(() => {});
 fetch("/api/logs?limit=2000").then((r) => r.json()).then((d) => {
-  for (const e of d.logs) entries.push(e);
+  for (const e of d.logs) entries.push(makeEntry(e.record));
   applyFilter();
 }).catch(() => {});
 setInterval(tick, 1000);

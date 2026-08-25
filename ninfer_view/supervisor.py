@@ -81,11 +81,6 @@ class Supervisor:
         if proc is None or proc.poll() is not None:
             return False, "not running"
         self._stopping = True
-        self.service.on_console_event({
-            "kind": "lifecycle", "phase": "stopping",
-            "ts": None, "level": "info",
-            "message": "stopping (SIGINT)", "raw": "stopping (SIGINT)",
-        })
         try:
             proc.send_signal(signal.SIGINT)
         except ProcessLookupError:
@@ -106,6 +101,11 @@ class Supervisor:
     @property
     def pid(self) -> int | None:
         return self.proc.pid if self.proc is not None else None
+
+    @property
+    def jsonl_path(self) -> str | None:
+        """Per-run --request-log-jsonl file (created by the child)."""
+        return str(self.run_dir / "requests.jsonl") if self.run_dir else None
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
