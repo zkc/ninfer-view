@@ -10,16 +10,22 @@ Log stream: the dashboard's log stream is fed *only* by the child's
 to drive the state machine and load-progress bar; stderr lines never enter
 the SSE log stream or the log backfill buffer.
 
-State flow:
+State flow (supervised, spawned by us):
     stopped -> starting -> loading -> warming -> running
               (spawn)    (model     (warmup   (listening
                           load)      line)     line)
     any -> stopping (SIGINT sent) -> stopped (exit 0) | crashed (exit != 0)
+
+Attach mode (external instance we do not own):
+    stopped/crashed -> attached -> (detach) -> stopped
+An attached instance is observed through its JSONL file (live-only,
+seek_end) plus a /health poller. No child, no stderr, no progress bar.
 """
 
 from __future__ import annotations
 
 import itertools
+import os
 import queue
 import threading
 import time
@@ -94,6 +100,10 @@ class Service:
         self.pid: int | None = None
         self.supervisor = None
         self.jsonl_tailer = None
+        self.health_poller = None
+        self.health: str | None = None          # "up" | "down" | None (unknown)
+        self.attached = False                    # observing an external instance
+        self.jsonl_path: str | None = None       # JSONL being tailed (any mode)
 
     # -- actions ---------------------------------------------------------
 
@@ -119,6 +129,8 @@ class Service:
             self.exit_code = None
             self.error = None
             self.pid = None
+            self.health = None
+            self.attached = False
             self.supervisor = Supervisor(self)
             self.jsonl_tailer = None
             ok, msg = self.supervisor.start(profile)
@@ -128,6 +140,7 @@ class Service:
             self.started_at = time.time()
             self.run_dir = str(self.supervisor.run_dir)
             self.pid = self.supervisor.pid
+            self.jsonl_path = str(self.supervisor.jsonl_path)
             from .jsonl_tail import JsonlTailer
             self.jsonl_tailer = JsonlTailer(self.supervisor.jsonl_path,
                                             self._on_jsonl_event)
@@ -145,6 +158,74 @@ class Service:
             if sup is None or not sup.alive():
                 return False, "not running"
             return sup.stop(timeout=timeout)
+
+    # -- attach mode (external instance) ---------------------------------
+
+    def attach(self, host: str, port: int,
+               jsonl_path: str) -> tuple[bool, str | None]:
+        """Observe an instance started outside ninfer-view.
+
+        Tails its requests.jsonl from the end (live-only) and polls its
+        /health endpoint. Requires a free slot: no supervised child and no
+        other attached instance.
+        """
+        jsonl_path = os.path.expanduser(str(jsonl_path))
+        if not jsonl_path:
+            return False, "jsonl_path is required"
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return False, "invalid port"
+        if not os.path.isfile(jsonl_path):
+            return False, f"jsonl file not found: {jsonl_path}"
+        with self.action_lock:
+            with self.lock:
+                if self.state not in ("stopped", "crashed"):
+                    return False, f"already {self.state}"
+            self._stop_health_poller()
+            self.model_id = None
+            self.progress = None
+            self.exit_code = None
+            self.error = None
+            self.pid = None
+            self.run_dir = None
+            self.running_at = None
+            self.started_at = time.time()
+            self.health = "down"  # updated by the first poll within ~2 s
+            self.attached = True
+            self.endpoint = f"http://{host}:{port}"
+            self.jsonl_path = jsonl_path
+            from .health import HealthPoller
+            from .jsonl_tail import JsonlTailer
+            self.jsonl_tailer = JsonlTailer(jsonl_path, self._on_jsonl_event,
+                                            seek_end=True)
+            self.jsonl_tailer.start()
+            self.health_poller = HealthPoller(
+                f"{self.endpoint}/health", self._on_health)
+            self.health_poller.start()
+            self._set_state("attached")
+            return True, None
+
+    def detach(self) -> tuple[bool, str | None]:
+        with self.action_lock:
+            if not self.attached:
+                return False, "not attached"
+            self._stop_health_poller()
+            if self.jsonl_tailer is not None:
+                self.jsonl_tailer.stop()
+                self.jsonl_tailer = None
+            self.attached = False
+            self.endpoint = None
+            self.jsonl_path = None
+            self.health = None
+            self.model_id = None
+            self._set_state("stopped")
+            return True, None
+
+    def _stop_health_poller(self) -> None:
+        if self.health_poller is not None:
+            self.health_poller.stop()
+            self.health_poller = None
 
     # -- callbacks from the supervisor -----------------------------------
 
@@ -169,7 +250,25 @@ class Service:
                 self.model_id = ev.get("model_id")
                 self.endpoint = ev.get("endpoint")
                 self.running_at = time.time()
+                # Ground-truth liveness from here on: /health answers only
+                # when the server actually accepts requests.
+                from .health import HealthPoller
+                if self.health_poller is None:
+                    self.health_poller = HealthPoller(
+                        f"{self.endpoint}/health", self._on_health)
+                    self.health_poller.start()
                 self._set_state("running")
+
+    def _on_health(self, ok: bool) -> None:
+        """Health poller callback (any mode); publishes only on change."""
+        value = "up" if ok else "down"
+        with self.lock:
+            if self.state == "stopped":
+                return
+            if self.health == value:
+                return
+            self.health = value
+        self.bus.publish({"kind": "state", **self.snapshot()})
 
     def _on_jsonl_event(self, rec: dict) -> None:
         """One parsed schema-v10 record from the tailer -> log stream."""
@@ -179,6 +278,7 @@ class Service:
         if self.jsonl_tailer is not None:
             self.jsonl_tailer.stop()
             self.jsonl_tailer = None
+        self._stop_health_poller()
         self.pid = None
         if stopping or code == 0:
             self._set_state("stopped", exit_code=code)
@@ -211,4 +311,7 @@ class Service:
                 "error": self.error,
                 "run_dir": self.run_dir,
                 "pid": self.pid,
+                "health": self.health,
+                "attached": self.attached,
+                "jsonl_path": self.jsonl_path,
             }

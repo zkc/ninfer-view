@@ -11,6 +11,9 @@ Routes (bound to 127.0.0.1 only; local tool, no auth):
     GET  /api/stream      SSE: state | server_start | request_start |
                            request_rejected | request_done | request_error |
                            throughput
+    POST /api/attach      {host, port, jsonl_path} — observe an external
+                           instance (live-only tail + /health poller)
+    POST /api/detach      stop observing
 Log stream: the /api/logs and /api/stream log events come only from the
 child's --request-log-jsonl file (schema v10); stderr never enters them.
 """
@@ -104,6 +107,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": err}, 200 if ok else 400)
         elif path == "/api/stop":
             ok, err = self.service.stop()
+            self._json({"ok": ok, "error": err}, 200 if ok else 400)
+        elif path == "/api/attach":
+            ok, err = self.service.attach(
+                str(body.get("host", "127.0.0.1")),
+                body.get("port", 8081),
+                str(body.get("jsonl_path", "")),
+            )
+            self._json({"ok": ok, "error": err}, 200 if ok else 400)
+        elif path == "/api/detach":
+            ok, err = self.service.detach()
             self._json({"ok": ok, "error": err}, 200 if ok else 400)
         elif path == "/api/profiles":
             profile = body.get("profile") or {}

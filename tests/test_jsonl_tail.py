@@ -104,9 +104,31 @@ def test_existing_file_reads_history():
     print("ok   test_existing_file_reads_history")
 
 
+def test_seek_end_ignores_history():
+    got = []
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "requests.jsonl")
+        with open(p, "w") as f:  # pre-existing history
+            f.write(json.dumps(base("server_start")) + "\n")
+            f.write(json.dumps(base("request_done")) + "\n")
+            f.write(json.dumps(base("throughput")) + "\n")
+        t = JsonlTailer(p, got.append, poll_s=0.05, seek_end=True)
+        t.start()
+        time.sleep(0.4)
+        assert got == [], ("seek_end must not replay history", got)
+        with open(p, "a") as f:  # only NEW events flow
+            f.write(json.dumps(base("request_start",
+                                    request={"request_id": 7})) + "\n")
+        time.sleep(0.4)
+        t.stop()
+    assert [r["event"] for r in got] == ["request_start"], got
+    print("ok   test_seek_end_ignores_history")
+
+
 if __name__ == "__main__":
     test_live_append()
     test_wait_for_file_then_stop()
     test_consumer_errors_dont_kill_tailer()
     test_existing_file_reads_history()
+    test_seek_end_ignores_history()
     print("ALL TAILER TESTS PASS")
