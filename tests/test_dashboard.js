@@ -6,6 +6,11 @@
  * built and the chart code path executed without throwing. Catches runtime
  * errors in the M2 aggregation/rendering code, not just syntax.
  *
+ * Also drives the Config tab: loads a saved profile into the generated
+ * form, checks the launch-command preview (incl. unknown-flag passthrough),
+ * simulates an edit, and verifies Start persists the dirty profile before
+ * POSTing /api/start.
+ *
  * Run:  node tests/test_dashboard.js
  */
 "use strict";
@@ -109,14 +114,33 @@ const backfillLogs = [
       decode_batch: { rounds: 55, row_rounds: 55, average_size: 1 } }) },
 ].map((e, i) => Object.assign({ kind: e.record.event, seq: i + 1 }, e));
 
-const fetchImpl = (url) => Promise.resolve({
-  json: () => Promise.resolve(
-    url.includes("/api/state")
-      ? { state: "running", model_id: "m", endpoint: "http://127.0.0.1:8081",
-          running_at: Date.now() / 1000 - 60, started_at: Date.now() / 1000 - 120,
-          health: "up" }
-      : { logs: backfillLogs }),
-});
+const profilesData = { profiles: {
+  default: {
+    id: "default", name: "test preset",
+    binary: "/bin/ninfer-serve", artifact: "/models/m.ninfer",
+    host: "127.0.0.1", port: 9999,
+    extra_flags: [
+      "--max-concurrency", "2",
+      "--spec", "mtp", "--draft-tokens", "3",
+      "--kv-dtype", "int8", "--lm-head-draft",
+      "--unknown-flag", "keepme",
+    ],
+  },
+}};
+const fetchCalls = [];
+const fetchImpl = (url, opts) => {
+  fetchCalls.push({ url: String(url), opts: opts || null });
+  if (opts && opts.method === "POST")
+    return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+  return Promise.resolve({
+    json: () => Promise.resolve(
+      String(url).includes("/api/state")
+        ? { state: "stopped" }
+        : String(url).includes("/api/profiles")
+        ? profilesData
+        : { logs: backfillLogs }),
+  });
+};
 
 const sandbox = {
   document, window: { addEventListener: () => {}, devicePixelRatio: 1 },
@@ -124,7 +148,9 @@ const sandbox = {
   setInterval: () => 0,
   fetch: fetchImpl,
   EventSource,
-  alert: () => {},
+  alert: (msg) => { console.error("alert():", msg); },
+  confirm: () => true,
+  prompt: () => null,
   console,
   // standard builtins are provided by the vm context
 };
@@ -175,8 +201,64 @@ const tick = () => new Promise((r) => setImmediate(r));
   const summary = getEl("reqSummary").textContent;
   console.assert(/done 2/.test(summary) && /rejected 1/.test(summary), "summary wrong: " + summary);
 
+  // --- config tab -----------------------------------------------------------
+  const findFid = (root, fid) => {
+    const stack = [root];
+    while (stack.length) {
+      const el = stack.pop();
+      if (el.dataset && el.dataset.fid === fid) return el;
+      for (const c of el.children || []) stack.push(c);
+    }
+    return null;
+  };
+  const cmdTxt = getEl("cmdPreview").textContent;
+  console.assert(cmdTxt.includes("/bin/ninfer-serve /models/m.ninfer"),
+    "preview missing target: " + cmdTxt);
+  console.assert(cmdTxt.includes("--host 127.0.0.1 --port 9999"),
+    "preview missing host/port: " + cmdTxt);
+  console.assert(cmdTxt.includes("--request-log-jsonl <run>/requests.jsonl"),
+    "preview missing injected jsonl: " + cmdTxt);
+  console.assert(cmdTxt.includes("--kv-dtype int8 --max-concurrency 2"),
+    "preview lost sizing flags: " + cmdTxt);
+  console.assert(cmdTxt.includes("--spec mtp --draft-tokens 3 --lm-head-draft"),
+    "preview lost spec flags: " + cmdTxt);
+  console.assert(cmdTxt.includes("--unknown-flag keepme"),
+    "preview lost unknown flag (raw passthrough): " + cmdTxt);
+
+  // simulate an edit: temperature 0.7 -> dirty -> reflected in the preview
+  const tempEl = findFid(getEl("cfgForm"), "temperature");
+  console.assert(tempEl, "temperature input missing from the generated form");
+  tempEl.value = "0.7";
+  tempEl._l.input({ target: tempEl });
+  await tick();
+  console.assert(getEl("cmdPreview").textContent.includes("--temperature 0.7"),
+    "preview not live after edit");
+  console.assert(getEl("cfgDirty").textContent === "unsaved changes",
+    "dirty indicator wrong: " + getEl("cfgDirty").textContent);
+
+  // Start must persist the dirty profile first, then launch it
+  await sandbox.doStart();
+  const saveCall = fetchCalls.find((c) => c.url === "/api/profiles" &&
+    c.opts && c.opts.method === "POST");
+  const startCall = fetchCalls.find((c) => c.url === "/api/start");
+  console.assert(saveCall, "Start did not upsert the dirty profile first");
+  const prof = JSON.parse(saveCall.opts.body).profile;
+  console.assert(prof.id === "default" && prof.port === 9999 &&
+    prof.binary === "/bin/ninfer-serve", "upserted profile mangled: " + saveCall.opts.body);
+  const ti = prof.extra_flags.indexOf("--temperature");
+  console.assert(ti >= 0 && prof.extra_flags[ti + 1] === "0.7",
+    "upserted extra_flags lost the edit");
+  const ui = prof.extra_flags.indexOf("--unknown-flag");
+  console.assert(ui >= 0 && prof.extra_flags[ui + 1] === "keepme",
+    "raw flag lost on save");
+  console.assert(startCall &&
+    JSON.parse(startCall.opts.body).profile_id === "default",
+    "Start did not POST /api/start with the selected profile id");
+
   console.log("reqPill:", reqPill.textContent, "| summary:", summary);
   console.log("curTput:", curTput.textContent);
   console.log("ctx calls: fillText=" + ctxStub._calls.fillText + " stroke=" + ctxStub._calls.stroke);
+  console.log("cmdPreview:", cmdTxt.slice(0, 130) + "\u2026");
+  console.log("upserted extra_flags:", prof.extra_flags.join(" "));
   console.log("DASHBOARD SMOKE TEST PASS");
 })().catch((e) => { console.error("SMOKE TEST FAIL:", e); process.exit(1); });

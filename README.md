@@ -5,7 +5,7 @@ a dashboard (browser) plus — in a later milestone — a GNOME top-bar tray ico
 
 See `PROPOSAL.md` for the full design and milestone plan.
 
-## Status: M1 + M2 complete (JSONL log stream, attach, /health, request table, metrics)
+## Status: M1 + M2 complete (JSONL log stream, attach, /health, request table, metrics, launch config form)
 
 M0 delivered the vertical slice: profile → spawn → live view → clean stop.
 M1 makes the **log stream fed only by the child's
@@ -16,8 +16,8 @@ M2 adds the **request table** and **throughput/scheduler charts** — both
 aggregate the *same* records the log pane consumes (backfill + SSE), so the
 server stays stateless and there is no second data path.
 
-Dashboard has three tabs: **Log** (formatted JSONL), **Requests** (table),
-**Metrics** (two live charts).
+Dashboard has four tabs: **Log** (formatted JSONL), **Requests** (table),
+**Metrics** (two live charts), **Config** (launch command form).
 
 - `GET /` — dashboard (status header, load progress bar, tabbed content,
   health chip, attach form)
@@ -42,6 +42,24 @@ Dashboard has three tabs: **Log** (formatted JSONL), **Requests** (table),
   redrawn live — *Throughput* (prefill + decode tok/s, computed as
   `tokens / interval_seconds`) and *Scheduler* (running / prefilling /
   decode_ready / waiting + avg decode batch), plus a current-values readout.
+- **Config tab**: form for the full launch command, built from the
+  "Server options" table in `docs/serving.md` — target (binary, artifact,
+  host, port, model-id, api-key), sizing (max context, kv capacity
+  follow/auto/explicit, kv dtype, concurrency 1..8, pending/timeout,
+  prefill chunk, default max tokens), speculative (spec off/mtp/dflash +
+  draft-tokens + lm-head draft), behavior (vision, thinking, cuda graph,
+  prefix reuse, CORS, device, stats interval), limits (request body, media
+  cache/live/threads, response store), and sampling overrides
+  (temperature / top-p / top-k / min-p / penalties / seed / greedy).
+  Fields show the documented defaults; empty = server default. A live
+  *launch command* preview shows the exact argv (including the per-run
+  `--request-log-jsonl` ninfer-view injects), with range/consistency
+  validation (e.g. concurrency 1..8, draft-tokens 1..5 MTP / 1..15 DFlash,
+  dflash×vision warning). Profiles are chosen/created in the tab
+  (`GET`/`POST /api/profiles`); flags the form doesn't know are preserved
+  verbatim in an *extra flags* box, so round-trips never lose anything.
+  **Start** (header or Config tab) persists unsaved form edits first, then
+  launches the selected profile, so the launch always matches the preview.
 - **JSONL tailer** (`jsonl_tail.py`): append-follower on `requests.jsonl`
   (poll-and-read; the server flushes per event). Malformed / non-ninfer lines
   are skipped and counted; consumer exceptions can't kill it.
@@ -56,7 +74,7 @@ Dashboard has three tabs: **Log** (formatted JSONL), **Requests** (table),
 - fresh per-run dir under `~/.local/state/ninfer-view/runs/<ts>/` with
   `argv.txt`, `stderr.log`, and the injected `requests.jsonl`
 
-Not yet in (M3+): tray icon, config drawer in the UI.
+Not yet in (M3+): tray icon.
 
 ## Run
 
@@ -80,8 +98,11 @@ the built-in default is always present:
     --spec mtp --draft-tokens 3 --lm-head-draft
 ```
 
-Custom launch flags go in the profile as `extra_flags`; the dashboard always
-injects `--host`, `--port`, and `--request-log-jsonl` itself.
+Custom launch flags go in the profile as `extra_flags` — the **Config** tab
+edits them through a form (every flag from the `docs/serving.md` server
+options table, grouped, with defaults and ranges shown) and previews the
+exact command before Start. The dashboard always injects `--host`, `--port`,
+and `--request-log-jsonl` itself.
 
 Environment override: `NINFER_VIEW_HOME=/some/dir` redirects both the config
 dir (`$NINFER_VIEW_HOME/profiles.json`) and the run dirs
@@ -159,7 +180,8 @@ fetch("/api/profiles", {method: "POST", headers: {"Content-Type": "application/j
     artifact: "/dev/null", host: "127.0.0.1", port: 8099}})})
 ```
 
-Then start with that profile (the UI currently starts `default`; use
+Then start it from the dashboard: open the **Config** tab, pick the `fake`
+profile from the dropdown, and click **Start** (or
 `curl -X POST http://127.0.0.1:18080/api/start -d '{"profile_id":"fake"}'`).
 You get the full lifecycle — progress bar, the purple `server_start` line,
 blue/red/dim request lines, `THRU` every 5 s — in about 8 seconds, and a
@@ -180,7 +202,8 @@ ninfer_view/
 └── httpd.py          ThreadingHTTPServer: REST + SSE + static dashboard
 web/
 └── index.html        single-file dashboard (no build step): JSONL formatters,
-                      attach form, health chip, request table + canvas charts
+                      attach form, health chip, request table + canvas charts,
+                      launch config form (flags per docs/serving.md)
 tests/
 ├── fake_ninfer_serve.py      fake binary: real stderr + realistic JSONL
 ├── fake_external_instance.py fake external instance (health + JSONL writer)
@@ -188,7 +211,8 @@ tests/
 ├── test_jsonl_tail.py        tailer tests (live append, partial lines,
 │                             seek_end, crashes)
 ├── test_health.py            health poller tests
-└── test_dashboard.js         dashboard script in a stub DOM (table + charts)
+└── test_dashboard.js         dashboard script in a stub DOM (table + charts
+                              + config-form round-trip and Start flow)
 ```
 
 ## Notes
