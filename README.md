@@ -94,6 +94,7 @@ Not yet in (M3+): tray icon.
 cd /home/kyle/code/ninfer-view
 python3 -m ninfer_view            # dashboard on http://127.0.0.1:18080
 python3 -m ninfer_view --port 19000   # different port
+python3 -m ninfer_view --load         # also load the model (default profile) at startup
 ```
 
 No dependencies — Python 3.12+ stdlib only.
