@@ -259,6 +259,28 @@ const tick = () => new Promise((r) => setImmediate(r));
   console.assert(ctxStub._moveTo.filter((p) => p.x > 50).length === 1,
     "small gap broke the line (jitter should stay connected)");
 
+  // small-value y axis (one in-flight request): the scheduler chart's values
+  // are 0/1, so the axis must label round, strictly-increasing values — not a
+  // 0–1.12 span integer-rounded into 1,1,1,0,0
+  ctxStub._fills.length = 0;
+  sandbox.drawChart(getEl("chartSched"), {
+    xMin: T, xMax: T + 120000, yMin: 0, yFmt: (v) => String(Math.round(v)),
+    series: [
+      { name: "running", pts: [[T + 10000, 1]] },
+      { name: "waiting", pts: [[T + 10000, 0]] },
+    ],
+  });
+  const schedLabels = ctxStub._fills
+    .filter((f) => f.align === "right" && f.x < 100)   // left-axis labels only
+    .map((f) => parseFloat(f.text));
+  console.assert(schedLabels.length >= 3,
+    "scheduler y labels missing: " + schedLabels.length);
+  console.assert(schedLabels.every((v, i) => i === 0 || v > schedLabels[i - 1]),
+    "scheduler y labels not strictly increasing: " + schedLabels.join(","));
+  console.assert(schedLabels[0] === 0 && schedLabels[schedLabels.length - 1] >= 1,
+    "scheduler y axis should start at 0 and cover the data: " + schedLabels.join(","));
+  console.log("scheduler y labels (one request): " + schedLabels.join(","));
+
   // rolling window: all points scrolled out → grid + hint, no empty box
   ctxStub._fills.length = 0;
   sandbox.drawChart(getEl("chartTput"), {

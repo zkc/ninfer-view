@@ -19,6 +19,35 @@ function tickTimes(xMin, xMax) {
   return out;
 }
 
+// "Nice" tick step (1/2/5 * 10^k), rounded UP — for the second axis, which
+// must share the first axis's interval count so both label the same lines.
+function niceStepUp(raw) {
+  if (!(raw > 0)) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / pow;
+  const f = n <= 1 + 1e-9 ? 1 : n <= 2 + 1e-9 ? 2 : n <= 5 + 1e-9 ? 5 : 10;
+  return f * pow;
+}
+
+// Extend [lo0, hi0] to round "nice" tick boundaries (1/2/5 * 10^k, d3-style)
+// and return the tick values, so grid lines and labels land on round numbers
+// even for small ranges (a 0–1.12 axis used to integer-round into 1,1,1,0,0).
+function niceAxis(lo0, hi0, target) {
+  if (!(hi0 > lo0)) hi0 = lo0 + 1;
+  const step0 = (hi0 - lo0) / Math.max(1, target);
+  const pow = Math.pow(10, Math.floor(Math.log10(step0)));
+  const err = Number((step0 / pow).toPrecision(12));  // kill 0.2/0.1=2.000…4 noise
+  // geometric-mean thresholds (d3-style): nearest of 1/2/5 * 10^k in log space
+  const step = err >= 7.0711 ? 10 * pow : err >= 3.1623 ? 5 * pow
+             : err >= 1.4142 ? 2 * pow : pow;
+  const lo = Math.floor(lo0 / step) * step;
+  const hi = Math.ceil(hi0 / step) * step;
+  const n = Math.round((hi - lo) / step);
+  const ticks = [];
+  for (let i = 0; i <= n; i++) ticks.push(Number((lo + i * step).toPrecision(12)));
+  return { lo, hi, ticks };
+}
+
 function sizeCanvas(cv) {
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth || cv.parentElement.clientWidth || 400;
@@ -46,7 +75,7 @@ function drawChart(cv, o) {
   // independently scaled axis (series opt in with `axis: "right"`), so e.g.
   // a prefill spike cannot squash the decode line — each series gets the
   // full vertical range on its own scale.
-  const mkAxis = (side) => {
+  const mkAxis = (side, nInt) => {
     let m = 0;
     // Scale to the points inside the rolling window only, so samples that
     // have scrolled out of view can't pin the axis scale.
@@ -56,12 +85,35 @@ function drawChart(cv, o) {
     const spec = side === "right" ? o.yRight : (o.yLeft || {});
     const min = spec.min != null ? spec.min
               : (side === "left" && o.yMin != null ? o.yMin : 0);
-    const max = spec.max != null ? spec.max : (m <= 0 ? 1 : m * 1.12);
-    return { min, max,
-             fmt: spec.fmt || o.yFmt || ((v) => String(Math.round(v))),
-             color: spec.color || "#8b949e" };
+    const rawMax = spec.max != null ? spec.max : (m <= 0 ? 1 : m * 1.12);
+    const lo0 = Math.min(min, rawMax), hi0 = Math.max(min, rawMax);
+    let lo, hi, ticks;
+    if (nInt != null) {
+      // Second axis: keep the first axis's interval count so its labels land
+      // on the same grid lines (dual-axis alignment).
+      const st = niceStepUp((hi0 - lo0) / Math.max(1, nInt));
+      lo = min; hi = min + nInt * st; ticks = [];
+      for (let i = 0; i <= nInt; i++)
+        ticks.push(Number((lo + i * st).toPrecision(12)));
+    } else {
+      const a = niceAxis(lo0, hi0, 5);
+      lo = a.lo; hi = a.hi; ticks = a.ticks;
+    }
+    const step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
+    const userFmt = spec.fmt || o.yFmt;
+    // A rounding formatter can only keep grid labels distinct when lines are
+    // >= 1 apart; for finer steps fall back to decimals so adjacent labels
+    // never collapse into each other.
+    const dec = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+    const fmt = userFmt && dec === 0 ? userFmt : (v) => {
+      let s = v.toFixed(dec);
+      if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+      return s === "-0" ? "0" : s;
+    };
+    return { min: lo, max: hi, ticks, fmt, color: spec.color || "#8b949e" };
   };
-  const AX = { left: mkAxis("left"), right: o.yRight ? mkAxis("right") : null };
+  const AX = { left: mkAxis("left"), right: null };
+  if (o.yRight) AX.right = mkAxis("right", AX.left.ticks.length - 1);
   const X = (x) => padL + (x - xMin) / (xMax - xMin) * pw;
   const Y = (y, side) => {
     const a = side === "right" ? AX.right : AX.left;
@@ -83,19 +135,19 @@ function drawChart(cv, o) {
     ctx.fillText("no recent samples", padL + pw / 2, h / 2);
     return;
   }
-  // grid + y labels (each axis labels its own scale; color matches series)
+  // grid + y labels: grid lines follow the left axis's ticks (round values);
+  // each axis labels its own scale on those lines, color matches the series
   ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.font = "10px monospace";
-  ctx.textAlign = "right";
-  for (let i = 0; i <= 4; i++) {
-    const yy = padT + ph - (ph * i) / 4;
+  for (const v of AX.left.ticks) {
+    const yy = Y(v, "left");
     ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
-    const lv = AX.left.min + (AX.left.max - AX.left.min) * i / 4;
     ctx.fillStyle = AX.left.color; ctx.textAlign = "right";
-    ctx.fillText(AX.left.fmt(lv), padL - 6, yy + 3);
-    if (AX.right) {
-      const rv = AX.right.min + (AX.right.max - AX.right.min) * i / 4;
+    ctx.fillText(AX.left.fmt(v), padL - 6, yy + 3);
+  }
+  if (AX.right) {
+    for (const v of AX.right.ticks) {
       ctx.fillStyle = AX.right.color; ctx.textAlign = "left";
-      ctx.fillText(AX.right.fmt(rv), w - padR + 6, yy + 3);
+      ctx.fillText(AX.right.fmt(v), w - padR + 6, Y(v, "right") + 3);
     }
   }
   // x labels (second-aligned ticks when provided — the rolling window)
