@@ -191,6 +191,8 @@ def serve(service, host: str, port: int) -> ThreadingHTTPServer:
     print("Ctrl-C to quit.")
     try:
         server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        print("\nninfer-view: shutting down")
     finally:
         server.server_close()
     return server
