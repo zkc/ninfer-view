@@ -260,11 +260,13 @@ const tick = () => new Promise((r) => setImmediate(r));
     "small gap broke the line (jitter should stay connected)");
 
   // small-value y axis (one in-flight request): the scheduler chart's values
-  // are 0/1, so the axis must label round, strictly-increasing values — not a
-  // 0–1.12 span integer-rounded into 1,1,1,0,0
+  // are 0/1, so the axis must label round, strictly-increasing, WHOLE values —
+  // not a 0–1.12 span integer-rounded into 1,1,1,0,0, and not decimals 0.2,0.4
+  // (the chart opts into integer stepping via yLeft.integer)
   ctxStub._fills.length = 0;
   sandbox.drawChart(getEl("chartSched"), {
     xMin: T, xMax: T + 120000, yMin: 0, yFmt: (v) => String(Math.round(v)),
+    yLeft: { integer: true },
     series: [
       { name: "running", pts: [[T + 10000, 1]] },
       { name: "waiting", pts: [[T + 10000, 0]] },
@@ -279,7 +281,19 @@ const tick = () => new Promise((r) => setImmediate(r));
     "scheduler y labels not strictly increasing: " + schedLabels.join(","));
   console.assert(schedLabels[0] === 0 && schedLabels[schedLabels.length - 1] >= 1,
     "scheduler y axis should start at 0 and cover the data: " + schedLabels.join(","));
+  console.assert(schedLabels.every((v) => Number.isInteger(v)),
+    "scheduler y axis should use whole integers: " + schedLabels.join(","));
   console.log("scheduler y labels (one request): " + schedLabels.join(","));
+
+  // the live render path opts the scheduler chart into integer stepping
+  const schedOpts = [];
+  const realDraw2 = sandbox.drawChart;
+  sandbox.drawChart = (cv, o2) => { if (cv.id === "chartSched") schedOpts.push(o2); };
+  sandbox.renderCharts();
+  sandbox.drawChart = realDraw2;
+  console.assert(schedOpts.length === 1 &&
+      schedOpts[0].yLeft && schedOpts[0].yLeft.integer === true,
+    "renderCharts did not enable integer y-axis on the scheduler chart");
 
   // rolling window: all points scrolled out → grid + hint, no empty box
   ctxStub._fills.length = 0;

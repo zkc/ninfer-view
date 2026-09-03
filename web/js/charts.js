@@ -32,7 +32,9 @@ function niceStepUp(raw) {
 // Extend [lo0, hi0] to round "nice" tick boundaries (1/2/5 * 10^k, d3-style)
 // and return the tick values, so grid lines and labels land on round numbers
 // even for small ranges (a 0–1.12 axis used to integer-round into 1,1,1,0,0).
-function niceAxis(lo0, hi0, target) {
+// `integer` forces a whole-number step (>= 1) for count axes that are always
+// whole values (the scheduler chart), so labels read 0,1,2 instead of 0.2,0.4.
+function niceAxis(lo0, hi0, target, integer) {
   if (!(hi0 > lo0)) hi0 = lo0 + 1;
   const step0 = (hi0 - lo0) / Math.max(1, target);
   const pow = Math.pow(10, Math.floor(Math.log10(step0)));
@@ -40,11 +42,12 @@ function niceAxis(lo0, hi0, target) {
   // geometric-mean thresholds (d3-style): nearest of 1/2/5 * 10^k in log space
   const step = err >= 7.0711 ? 10 * pow : err >= 3.1623 ? 5 * pow
              : err >= 1.4142 ? 2 * pow : pow;
-  const lo = Math.floor(lo0 / step) * step;
-  const hi = Math.ceil(hi0 / step) * step;
-  const n = Math.round((hi - lo) / step);
+  const st = integer ? Math.max(1, step) : step;  // 1 is itself a nice step
+  const lo = Math.floor(lo0 / st) * st;
+  const hi = Math.ceil(hi0 / st) * st;
+  const n = Math.round((hi - lo) / st);
   const ticks = [];
-  for (let i = 0; i <= n; i++) ticks.push(Number((lo + i * step).toPrecision(12)));
+  for (let i = 0; i <= n; i++) ticks.push(Number((lo + i * st).toPrecision(12)));
   return { lo, hi, ticks };
 }
 
@@ -96,7 +99,7 @@ function drawChart(cv, o) {
       for (let i = 0; i <= nInt; i++)
         ticks.push(Number((lo + i * st).toPrecision(12)));
     } else {
-      const a = niceAxis(lo0, hi0, 5);
+      const a = niceAxis(lo0, hi0, 5, spec.integer);
       lo = a.lo; hi = a.hi; ticks = a.ticks;
     }
     const step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
@@ -234,6 +237,7 @@ function renderCharts() {
   drawChart($("chartSched"), {
     xMin, xMax, xticks, yMin: 0, yFmt: (v) => String(Math.round(v)), xFmt: tsShort,
     breakGapMs,
+    yLeft: { integer: true },   // scheduler counts are whole numbers: 0,1,2, not 0.2,0.4
     series: [
       { name: "running",      color: "#3fb950", pts: vis.map((p) => [p.t, p.running]) },
       { name: "prefilling",   color: "#d29922", pts: vis.map((p) => [p.t, p.prefilling]) },
