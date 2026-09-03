@@ -12,6 +12,9 @@ from ninfer_view.console_parse import parse_line
 
 PREFIX = "[2026-08-24 21:00:00.000] [info] ninfer-serve: "
 
+# Current (structured) format, as emitted by the latest ninfer-serve:
+NPREFIX = "[2026-09-02 00:19:18.705] [info] [ninfer-serve] "
+
 
 def cxx_progress(phase, pct, done, total, secs):
     # Mirrors LoadProgressRenderer::format_line (Log mode):
@@ -90,6 +93,97 @@ CASES = [
      "garbage without prefix",
      lambda e: e["kind"] == "console" and e["ts"] is None),
 ]
+
+# --- current (structured) format -------------------------------------------
+# These mirror real lines from ninfer-serve >= the structured-logging build,
+# e.g. /home/kyle/.local/state/ninfer-view/runs/20260902-001918-683821.
+
+NEW_CASES = [
+    ("new: first startup line -> loading",
+     NPREFIX + "startup phase=engine-startup status=begin",
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "loading"),
+    ("new: weights begin -> progress 0%",
+     NPREFIX + "startup phase=weights-materialize status=begin"
+              " total_bytes=21183894976",
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["phase"] == "weights-materialize"
+               and e["progress"]["percent"] == 0.0
+               and e["progress"]["total"] == "19.73 GiB"
+               and e["progress"]["done"] == "0 B"),
+    ("new: weights complete -> progress 100%",
+     NPREFIX + "startup phase=weights-materialize status=complete"
+              " completed_bytes=21183894976 total_bytes=21183894976"
+              " duration_ms=5886.584",
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["percent"] == 100.0
+               and e["progress"]["done"] == "19.73 GiB"
+               and abs(e["progress"]["elapsed_s"] - 5.886584) < 1e-9),
+    ("new: serve-warmup begin -> warming",
+     NPREFIX + "startup phase=serve-warmup status=begin",
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "warming"),
+    ("new: engine ready -> loaded",
+     "[2026-09-02 00:19:29.053] [info] [ninfer-serve] engine status=ready"
+     ' target="qwen3_8_27b" model_id="qwen3.8-27b" weights_id="nvfp4"'
+     " target_load_ms=10116.848 materialization_pipeline_ms=5809.461"
+     " artifact_bytes_read=21196796217 host_to_device_bytes=21183894976"
+     " peak_staging_bytes=268435456 tensors=673 resources=6",
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "loaded"
+               and abs(e["load_seconds"] - 10.116848) < 1e-9),
+    ("new: engine capacity -> kv",
+     NPREFIX + "engine capacity kv_capacity_mode=explicit"
+              " kv_capacity_tokens=262144 kv_page_groups=4096"
+              " kv_max_page_groups=16384",
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "kv"),
+    ("new: server ready -> listening",
+     "[2026-09-02 00:19:29.126] [info] [ninfer-serve] server status=ready"
+     ' host="127.0.0.1" port=8081 model_id="qwen3.8-27b" auth_enabled=false',
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "listening"
+               and e["endpoint"] == "http://127.0.0.1:8081"
+               and e["model_id"] == "qwen3.8-27b"
+               and e["auth"] == "disabled"),
+    ("new: startup failed (error)",
+     "[2026-09-02 00:15:16.861] [error] [ninfer-serve]"
+     " startup phase=target-plan status=failed duration_ms=0.561",
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"
+               and e["level"] == "error"
+               and e["detail"] == "startup phase target-plan failed"),
+    ("new: server failed w/ detail (critical)",
+     '[2026-09-02 00:15:16.861] [critical] [ninfer-serve] server status=failed'
+     ' phase=startup detail="requested Engine runtime reservation requires'
+     ' 10894288128 bytes, but only 10758513664 bytes are available for'
+     ' runtime capacity"',
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"
+               and e["level"] == "critical"
+               and e["detail"].startswith("requested Engine runtime"
+                                          " reservation")),
+    ("new: request submitted -> activity",
+     NPREFIX + 'request id=1 status=submitted protocol="openai_chat_completions"'
+     " stream=true messages=2 media_items=0 requested_output_tokens=64"
+     " tools=0 thinking=false reasoning_effort=none preserve_thinking=false",
+     lambda e: e["kind"] == "activity"),
+    ("new: request done -> activity",
+     NPREFIX + "request id=1 status=done finish_reason=stop_token"
+     " prompt_tokens=198 completion_tokens=10 prefix_cache_hit_tokens=0"
+     " prefix_reuse_path=root ttft_ms=90.939 duration_ms=495.584"
+     " prefill_tokens_per_second=2238.976 decode_tokens_per_second=128.868",
+     lambda e: e["kind"] == "activity"),
+    ("new: throughput -> activity",
+     NPREFIX + "throughput interval_ms=5000.066 computed_prefill_tokens=8407"
+     " committed_decode_tokens=144 prefill_tokens_per_second=1681.378"
+     " decode_tokens_per_second=28.800 running=1 prefilling=1"
+     " decode_ready=0 waiting=0",
+     lambda e: e["kind"] == "activity"),
+    ("new: complete w/o bytes passes through",
+     NPREFIX + "startup phase=engine-startup status=complete"
+              " duration_ms=10348.024",
+     lambda e: e["kind"] == "console" and e["ts"] is not None),
+    ("new: engine context_cache passes through",
+     NPREFIX + "engine context_cache enabled=true active_lanes=4"
+              " device_state_slots=2 host_state_slots=16",
+     lambda e: e["kind"] == "console" and e["level"] == "info"),
+]
+
+CASES += NEW_CASES
 
 
 def main():

@@ -14,6 +14,10 @@ State flow (supervised, spawned by us):
     stopped -> starting -> loading -> warming -> running
               (spawn)    (model     (warmup   (listening
                           load)      line)     line)
+    (stderr is the legacy free-form format or the current structured
+    "startup phase=... status=..." format; both map to the same lifecycle
+    events. A structured "status=failed" line records the failure reason,
+    which the crashed state reports.)
     any -> stopping (SIGINT sent) -> stopped (exit 0) | crashed (exit != 0)
 
 Attach mode (external instance we do not own):
@@ -244,7 +248,7 @@ class Service:
             phase = ev.get("phase")
             if phase == "loading" and self.state == "starting":
                 self._set_state("loading")
-            elif phase == "warming":
+            elif phase == "warming" and self.state in ("starting", "loading"):
                 self._set_state("warming")
             elif phase == "listening":
                 self.model_id = ev.get("model_id")
@@ -258,6 +262,16 @@ class Service:
                         f"{self.endpoint}/health", self._on_health)
                     self.health_poller.start()
                 self._set_state("running")
+            elif phase == "failed":
+                # Current-format `status=failed` line: keep the reason so the
+                # crashed state can show it. The child exits non-zero
+                # shortly after; on_child_exit preserves this detail.
+                with self.lock:
+                    changed = (self.state not in ("stopped", "crashed"))
+                    if changed:
+                        self.error = ev.get("detail") or "startup failed"
+                if changed:
+                    self.bus.publish({"kind": "state", **self.snapshot()})
 
     def _on_health(self, ok: bool) -> None:
         """Health poller callback (any mode); publishes only on change."""
@@ -283,8 +297,13 @@ class Service:
         if stopping or code == 0:
             self._set_state("stopped", exit_code=code)
         else:
-            self._set_state("crashed", exit_code=code,
-                            error=f"process exited with code {code}")
+            # Prefer the structured failure reason captured from the
+            # child's own stderr ("status=failed" line); fall back to the
+            # bare exit code.
+            with self.lock:
+                if not self.error:
+                    self.error = f"process exited with code {code}"
+            self._set_state("crashed", exit_code=code)
 
     # -- internals ---------------------------------------------------------
 

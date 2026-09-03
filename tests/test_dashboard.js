@@ -1,7 +1,9 @@
-/* DOM-stub smoke test for the dashboard script.
+/* DOM-stub smoke test for the dashboard scripts.
  *
- * Loads web/index.html, runs its <script> in a minimal DOM (no browser, no
- * server), feeds it schema-v10 records via the backfill path and simulated
+ * Loads web/index.html, collects its <script src="js/..."> files in document
+ * order, and runs them (concatenated, as one global-scope script — the way a
+ * browser's classic <script> tags share scope) in a minimal DOM (no browser,
+ * no server), feeds it schema-v10 records via the backfill path and simulated
  * SSE events, then asserts the request table + throughput series actually
  * built and the chart code path executed without throwing. Catches runtime
  * errors in the M2 aggregation/rendering code, not just syntax.
@@ -19,10 +21,16 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const html = fs.readFileSync(path.join(__dirname, "..", "web", "index.html"), "utf8");
-const m = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!m) throw new Error("no <script> in index.html");
-const code = m[1];
+const webRoot = path.join(__dirname, "..", "web");
+const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
+const srcs = [...html.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1]);
+if (!srcs.length) throw new Error("no <script src> tags in index.html");
+const code = srcs.map((src) => {
+  const p = path.resolve(webRoot, src);
+  if (p !== webRoot && !p.startsWith(webRoot + path.sep))
+    throw new Error("script src escapes web/: " + src);
+  return fs.readFileSync(p, "utf8");
+}).join("\n");
 
 // ---- minimal DOM ----------------------------------------------------------
 
@@ -315,6 +323,48 @@ const tick = () => new Promise((r) => setImmediate(r));
   const summary = getEl("reqSummary").textContent;
   console.assert(/done 2/.test(summary) && /rejected 1/.test(summary), "summary wrong: " + summary);
 
+  // waiting status: active rows are attributed to the scheduler's waiting
+  // count (newest first — FIFO admission, monotonic request ids), shown as a
+  // badge and a separate summary count; a later sample with waiting=0
+  // flips them back to active.
+  fire("request_start", R("request_start", { request: req(4),
+    timestamp_unix_ms: now + 5500 }));
+  fire("throughput", R("throughput", { timestamp_unix_ms: now + 6000, interval_seconds: 5,
+    tokens: { computed_prefill: 0, committed_decode: 300 },
+    scheduler: { running: 1, prefilling: 0, decode_ready: 1, waiting: 1 },
+    decode_batch: { rounds: 60, row_rounds: 60, average_size: 1 } }));
+  await tick();
+  let sumW = getEl("reqSummary").textContent;
+  console.assert(/waiting 1/.test(sumW) && /active 0/.test(sumW),
+    "waiting not attributed from scheduler count: " + sumW);
+  // (the stub's appendChild pushes each row fragment into the body instead
+  // of splicing its children like a real DOM would, so unwrap one level)
+  const badges = getEl("reqBody").children
+    .flatMap((c) => (c.children || [])
+      .map((rf) => rf.children && rf.children[0])
+      .filter((tr) => tr && tr.className === "main"))
+    .map((tr) => tr.children[1]);
+  console.assert(badges.some((td) => td.textContent === "waiting"),
+    "no row shows the waiting badge");
+  // clamp: waiting=3 with a single active row still marks exactly one
+  fire("throughput", R("throughput", { timestamp_unix_ms: now + 11000, interval_seconds: 5,
+    tokens: { computed_prefill: 0, committed_decode: 100 },
+    scheduler: { running: 1, prefilling: 0, decode_ready: 1, waiting: 3 },
+    decode_batch: { rounds: 20, row_rounds: 20, average_size: 1 } }));
+  await tick();
+  sumW = getEl("reqSummary").textContent;
+  console.assert(/waiting 1/.test(sumW),
+    "waiting count not clamped to the active rows: " + sumW);
+  // newest sample waiting=0 → back to active
+  fire("throughput", R("throughput", { timestamp_unix_ms: now + 16000, interval_seconds: 5,
+    tokens: { computed_prefill: 0, committed_decode: 300 },
+    scheduler: { running: 1, prefilling: 0, decode_ready: 1, waiting: 0 },
+    decode_batch: { rounds: 60, row_rounds: 60, average_size: 1 } }));
+  await tick();
+  sumW = getEl("reqSummary").textContent;
+  console.assert(/active 1/.test(sumW) && /waiting 0/.test(sumW),
+    "waiting not cleared when the scheduler count drops: " + sumW);
+
   // --- config tab -----------------------------------------------------------
   const findFid = (root, fid) => {
     const stack = [root];
@@ -369,7 +419,8 @@ const tick = () => new Promise((r) => setImmediate(r));
     JSON.parse(startCall.opts.body).profile_id === "default",
     "Start did not POST /api/start with the selected profile id");
 
-  console.log("reqPill:", reqPill.textContent, "| summary:", summary);
+  console.log("reqPill:", reqPill.textContent,
+    "| summary:", getEl("reqSummary").textContent);
   console.log("curTput:", curTput.textContent);
   console.log("ctx calls: fillText=" + ctxStub._calls.fillText + " stroke=" + ctxStub._calls.stroke);
   console.log("cmdPreview:", cmdTxt.slice(0, 130) + "\u2026");

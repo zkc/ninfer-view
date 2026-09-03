@@ -2,6 +2,7 @@
 
 Routes (bound to 127.0.0.1 only; local tool, no auth):
     GET  /                dashboard (web/index.html)
+    GET  /style.css, /js/*.js  static dashboard assets under web/
     GET  /api/state       state snapshot
     GET  /api/logs        recent JSONL log events (backfill)
     GET  /api/profiles    saved launch profiles
@@ -47,6 +48,25 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
+    _STATIC_TYPES = {
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+    }
+
+    def _static(self, rel: str) -> None:
+        """Serve a dashboard asset from web/ (path-traversal-proof)."""
+        base = WEB_DIR.resolve()
+        target = (base / rel).resolve()
+        if target != base and base not in target.parents:
+            return self._json({"error": "not found"}, 404)
+        if not target.is_file():
+            return self._json({"error": "not found"}, 404)
+        ctype = self._STATIC_TYPES.get(target.suffix, "application/octet-stream")
+        self._send(200, target.read_bytes(), ctype)
+
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
@@ -87,8 +107,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"profiles": self.service.profiles.all()})
         elif path == "/api/stream":
             self._sse()
-        else:
+        elif path.startswith("/api/"):
             self._json({"error": "not found"}, 404)
+        else:
+            self._static(path.lstrip("/"))
 
     def do_POST(self):
         try:

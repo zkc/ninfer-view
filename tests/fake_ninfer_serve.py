@@ -3,8 +3,11 @@
 
 Two output streams, both matching the real binary:
 
-1. The exact stderr lifecycle (same prefix format, progress-line shape,
-   listening line, request/throughput activity lines) over ~8 seconds.
+1. The current structured stderr startup log
+   (``[ninfer-serve] startup phase=... status=begin|complete ...``,
+   ``engine status=ready``, ``server status=ready ...`` and
+   ``request id=N status=...`` / ``throughput ...`` activity lines) over
+   ~8 seconds.
 2. Realistic schema-v10 records into the file named by
    ``--request-log-jsonl PATH`` (server_start after load, then
    request_start / request_done / request_rejected / throughput), the same
@@ -33,8 +36,8 @@ def ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def log(msg: str) -> None:
-    sys.stderr.write(f"[{ts()}] [info] ninfer-serve: {msg}\n")
+def log(msg: str, level: str = "info") -> None:
+    sys.stderr.write(f"[{ts()}] [{level}] [ninfer-serve] {msg}\n")
     sys.stderr.flush()
 
 
@@ -90,20 +93,53 @@ def main() -> None:
     a = parse_args(sys.argv[1:])
     jsonl = Jsonl(a["jsonl"])
 
-    log("loading model...")
-    for p in (10.00, 35.50, 60.25, 90.10, 100.00):
-        # Mirrors LoadProgressRenderer::format_line (Log mode).
-        log(
-            f"load        load_weights                  {p:.2f}%      6.20 GiB /"
-            f"      12.40 GiB        2.300 s"
-        )
-        time.sleep(1)
-    log("model loaded in 10.500 s")
-    log(
-        "KV capacity auto resolved=245000 tokens pages=3828/4096"
-        " runtime=1.00 GiB free-after-weights=3.00 GiB free-after-startup=2.00 GiB"
-        " headroom=1.00 GiB slack=0.50 GiB graphs=1.20 GiB/2.00 GiB"
-    )
+    total_bytes = 13209497446  # matches the JSONL artifact payload below
+    log("startup phase=engine-startup status=begin")
+    log("startup phase=cuda-initialize status=begin")
+    time.sleep(1)
+    log("startup phase=cuda-initialize status=complete duration_ms=229.309")
+    log("startup phase=artifact-inspect status=begin")
+    log("startup phase=artifact-inspect status=complete duration_ms=3.164")
+    log("startup phase=target-plan status=begin")
+    log("startup phase=target-plan status=complete duration_ms=26.542")
+    log(f"startup phase=weights-materialize status=begin"
+        f" total_bytes={total_bytes}")
+    # The current binary emits no intermediate progress lines while
+    # materializing; the phase jumps 0% -> 100% at completion.
+    time.sleep(4)
+    log(f"startup phase=weights-materialize status=complete"
+        f" completed_bytes={total_bytes} total_bytes={total_bytes}"
+        " duration_ms=4000.000")
+    log("startup phase=target-finalize status=begin")
+    log("startup phase=target-finalize status=complete duration_ms=2.635")
+    log("startup phase=frontend-initialize status=begin")
+    log("startup phase=frontend-initialize status=complete duration_ms=327.474")
+    log("startup phase=program-initialize status=begin")
+    log("startup phase=host-state-pin status=begin total_bytes=1073741824")
+    time.sleep(1)
+    log("startup phase=host-state-pin status=complete"
+        " completed_bytes=1073741824 total_bytes=1073741824"
+        " duration_ms=1000.000")
+    log("startup phase=host-kv-pin status=begin total_bytes=2147483648")
+    log("startup phase=host-kv-pin status=complete completed_bytes=2147483648"
+        " total_bytes=2147483648 duration_ms=150.000")
+    log("startup phase=cuda-graph-prepare status=begin")
+    log("startup phase=cuda-graph-prepare status=complete duration_ms=532.571")
+    log("startup phase=program-initialize status=complete"
+        " duration_ms=6000.000")
+    log("startup phase=engine-finalize status=begin")
+    log("startup phase=engine-finalize status=complete duration_ms=0.282")
+    log("startup phase=engine-startup status=complete duration_ms=10500.000")
+    log(f"engine status=ready target=\"fake\" model_id=\"{MODEL_ID}\""
+        " weights_id=\"fake-weights-1\" target_load_ms=10500.000"
+        " materialization_pipeline_ms=4000.000"
+        f" artifact_bytes_read={total_bytes} host_to_device_bytes={total_bytes}"
+        " peak_staging_bytes=1073741824 tensors=290 resources=4")
+    log("engine capacity kv_capacity_mode=auto kv_capacity_tokens=245000"
+        " kv_page_groups=3828 kv_max_page_groups=4096"
+        " runtime_reservation_bytes=1073741824"
+        " available_after_weights_bytes=3221225472"
+        " available_after_startup_bytes=2147483648")
     # server_start is written at attach: model loaded, warmup not yet done.
     jsonl.emit(
         "server_start",
@@ -178,10 +214,11 @@ def main() -> None:
         argv=[sys.argv[0], "--host", a["host"], "--port", str(a["port"]),
               "--request-log-jsonl", a["jsonl"] or ""],
     )
-    log("warming up...")
+    log("startup phase=serve-warmup status=begin")
     time.sleep(1)
-    log(f"listening on http://{a['host']}:{a['port']}"
-        f" (model id: {MODEL_ID}, auth: disabled)")
+    log("startup phase=serve-warmup status=complete duration_ms=1000.000")
+    log(f"server status=ready host=\"{a['host']}\" port={a['port']}"
+        f" model_id=\"{MODEL_ID}\" auth_enabled=false")
 
     # One accepted request (with thinking) and one rejection to exercise the
     # red rows in the dashboard.
@@ -208,12 +245,9 @@ def main() -> None:
             "built_patch_bytes": 0, "reused_patch_bytes": 0,
         },
     )
-    log(
-        "[req 1] openai_chat non-stream msgs=2 max_tokens=128 (client) tools=0"
-        " tool_choice=auto tool_history=no thinking=on preserve_thinking=off"
-        " preserve_change=no sampler=[t=1.0 p=0.95 k=20 minp=0.0 pres=0.0 freq=0.0]"
-        " \u2192 submitted"
-    )
+    log("request id=1 status=submitted protocol=\"openai_chat\" stream=false"
+        " messages=2 media_items=0 requested_output_tokens=128 tools=0"
+        " thinking=true reasoning_effort=medium preserve_thinking=false")
     time.sleep(1)
     jsonl.emit(
         "request_done",
@@ -245,11 +279,11 @@ def main() -> None:
             "fallback_steps": 0, "accepted_per_position": 2.5,
         },
     )
-    log(
-        "[req 1] done finish=stop_token prompt=42 gen=128 cache=40"
-        " reuse=append_frontier ttft=95ms prefill=8100.00tok/s decode=55.00tok/s"
-        " wall=2.40s speculative=mtp 3.48tok/round (82.8%)"
-    )
+    log("request id=1 status=done finish_reason=stop_token prompt_tokens=42"
+        " completion_tokens=128 prefix_cache_hit_tokens=40"
+        " prefix_reuse_path=append_frontier ttft_ms=95.000 duration_ms=2400.000"
+        " prefill_tokens_per_second=8100.000"
+        " decode_tokens_per_second=55.000")
     jsonl.emit(
         "request_rejected",
         phase="prepare",
@@ -267,12 +301,11 @@ def main() -> None:
                        " context ceiling (262144)",
         },
     )
-    log(
-        "[req 2] rejected phase=prepare protocol=openai_responses stream"
-        " msgs=1 media=0 tools=0 status=400 code=context_length_exceeded"
+    log("request id=2 status=rejected phase=prepare protocol=openai_responses"
+        " stream=true messages=1 media_items=0 requested_output_tokens=8192"
+        " tools=0 status=400 code=context_length_exceeded"
         " message=expanded prompt (40980 tokens) exceeds the configured context"
-        " ceiling (262144)"
-    )
+        " ceiling (262144)")
 
     def throughput_event(prefill: int, decode: int, running: int,
                           rounds: int, row_rounds: int) -> None:
@@ -289,12 +322,13 @@ def main() -> None:
             decode_batch={"rounds": rounds, "row_rounds": row_rounds,
                           "average_size": (row_rounds / rounds) if rounds else None},
         )
-        rate = f"{decode / interval:.1f}"
         log(
-            f"throughput interval={interval:.3f}s prefill={prefill / interval:.1f}"
-            f"tok/s decode={rate}tok/s running={running} prefilling=0"
-            f" decode_ready={running} waiting=0"
-            f" avg_decode_batch={(row_rounds / rounds) if rounds else float('nan'):.2f}"
+            f"throughput interval_ms={interval * 1000:.3f}"
+            f" computed_prefill_tokens={prefill} committed_decode_tokens={decode}"
+            f" prefill_tokens_per_second={prefill / interval:.3f}"
+            f" decode_tokens_per_second={decode / interval:.3f} running={running}"
+            f" prefilling=0 decode_ready={running} waiting=0"
+            f" average_decode_batch={(row_rounds / rounds) if rounds else 0:.3f}"
         )
 
     throughput_event(210, 275, 1, 55, 55)

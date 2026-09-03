@@ -54,6 +54,24 @@ All three exist **without any changes to ninfer**:
    Note: with stderr piped (our case), load progress uses *Log mode*: plain newline-terminated
    lines every ~10 s — no `\r` in-place updates to parse.
 
+   **Update (2026-09):** the latest ninfer-serve replaced the free-form lifecycle lines with
+   structured key=value startup logs (prefix is now `[ninfer-serve]`, and a `critical` level
+   exists). The parser (`console_parse.py`) accepts both formats; current-format lines:
+   ```
+   startup phase=<p> status=begin [total_bytes=N]          (serve-warmup begin → warming)
+   startup phase=<p> status=complete completed_bytes=N total_bytes=N duration_ms=M
+                                                            (byte-count phases → 0%/100% progress)
+   startup phase=<p> status=failed                         (failure; level error)
+   engine status=ready ... target_load_ms=M                (model loaded)
+   engine capacity kv_capacity_mode=... kv_capacity_tokens=...
+   server status=ready host="127.0.0.1" port=8081 model_id="qwen3.8-27b" auth_enabled=false
+   server status=failed ... detail="..."                   (level critical; reason for crashed state)
+   request id=N status=submitted|done|...                  (activity)
+   throughput interval_ms=... running=... waiting=...      (activity)
+   ```
+   There are no intermediate progress lines anymore: the bar shows the active phase at 0% and
+   jumps to 100% on `status=complete`.
+
 2. **`--request-log-jsonl FILE`** — machine-readable schema-v10 JSONL, flushed after every event,
    opened in **append mode** (we give it a fresh file per run). Events:
    | Event | What the UI gets |
