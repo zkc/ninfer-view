@@ -135,8 +135,12 @@ const profilesData = { profiles: {
     host: "127.0.0.1", port: 9999,
     extra_flags: [
       "--max-concurrency", "2",
+      "--device-state-slots", "2",
+      "--host-state-slots", "16",
+      "--host-kv-mib", "24576",
       "--spec", "mtp", "--draft-tokens", "3",
       "--kv-dtype", "int8", "--lm-head-draft",
+      "--default-thinking-budget", "512",
       "--unknown-flag", "keepme",
     ],
   },
@@ -386,6 +390,11 @@ const tick = () => new Promise((r) => setImmediate(r));
     "preview lost sizing flags: " + cmdTxt);
   console.assert(cmdTxt.includes("--spec mtp --draft-tokens 3 --lm-head-draft"),
     "preview lost spec flags: " + cmdTxt);
+  console.assert(cmdTxt.includes(
+    "--device-state-slots 2 --host-state-slots 16 --host-kv-mib 24576"),
+    "preview lost context-cache flags: " + cmdTxt);
+  console.assert(cmdTxt.includes("--default-thinking-budget 512"),
+    "preview lost default thinking budget: " + cmdTxt);
   console.assert(cmdTxt.includes("--unknown-flag keepme"),
     "preview lost unknown flag (raw passthrough): " + cmdTxt);
 
@@ -415,9 +424,33 @@ const tick = () => new Promise((r) => setImmediate(r));
   const ui = prof.extra_flags.indexOf("--unknown-flag");
   console.assert(ui >= 0 && prof.extra_flags[ui + 1] === "keepme",
     "raw flag lost on save");
+  const dsi = prof.extra_flags.indexOf("--device-state-slots");
+  console.assert(dsi >= 0 && prof.extra_flags[dsi + 1] === "2",
+    "context-cache flag lost on save");
+  const tbi = prof.extra_flags.indexOf("--default-thinking-budget");
+  console.assert(tbi >= 0 && prof.extra_flags[tbi + 1] === "512",
+    "default thinking budget lost on save");
   console.assert(startCall &&
     JSON.parse(startCall.opts.body).profile_id === "default",
     "Start did not POST /api/start with the selected profile id");
+
+  // --no-prefix-reuse conflicts with any explicit context-cache capacity
+  // flag (serve_options rejects the combination at startup)
+  const conflict = sandbox.cfgDefaultValues();
+  conflict.binary = "/bin/serve"; conflict.artifact = "/m.ninfer";
+  conflict.no_prefix_reuse = true; conflict.host_kv_mib = "24576";
+  const cv = sandbox.cfgValidate(conflict);
+  console.assert(cv.errs.some((e) => /no-prefix-reuse/.test(e)),
+    "no-prefix-reuse x context-cache conflict not flagged: " + JSON.stringify(cv));
+  // non-numeric text fields (model id / api key / preset path) are not
+  // number-validated
+  const textv = sandbox.cfgDefaultValues();
+  textv.binary = "/bin/serve"; textv.artifact = "/m.ninfer";
+  textv.model_id = "qwen3.8-27b"; textv.api_key = "local-secret";
+  textv.context_cost_presets = "/presets/rt.json";
+  const tv = sandbox.cfgValidate(textv);
+  console.assert(tv.errs.length === 0,
+    "text fields should not be number-validated: " + JSON.stringify(tv));
 
   console.log("reqPill:", reqPill.textContent,
     "| summary:", getEl("reqSummary").textContent);

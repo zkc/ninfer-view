@@ -31,8 +31,8 @@ const CFG_SECTIONS = [
     { id: "kv_capacity_value", kind: "int", label: "kv tokens",
       hint: "used when kv capacity = explicit", min: 1 },
     { id: "kv_dtype", flag: "--kv-dtype", kind: "enum",
-      options: ["bf16", "int8"], default: "bf16", label: "kv dtype",
-      hint: "default bf16" },
+      options: ["bf16", "int8", "fp8", "nvfp4", "k8v4"], default: "bf16",
+      label: "kv dtype", hint: "default bf16" },
     { id: "max_concurrency", flag: "--max-concurrency", kind: "int",
       label: "max concurrency", hint: "active requests \u00b7 1..8 \u00b7 default 1",
       min: 1, max: 8 },
@@ -46,6 +46,31 @@ const CFG_SECTIONS = [
     { id: "default_max_tokens", flag: "--default-max-tokens", kind: "int",
       label: "default max tokens",
       hint: "output limit when the request omits it \u00b7 default 8192", min: 1 },
+  ]},
+  { title: "Context cache",
+    desc: "device checkpoints \u00b7 host offload \u00b7 descriptors", fields: [
+    { id: "device_state_slots", flag: "--device-state-slots", kind: "int",
+      label: "device state slots",
+      hint: "extra Device checkpoints beyond active lanes \u00b7 default: max concurrency",
+      min: 0 },
+    { id: "host_state_slots", flag: "--host-state-slots", kind: "int",
+      label: "host state slots", hint: "pinned Host StateImages \u00b7 default 8", min: 0 },
+    { id: "host_kv_mib", flag: "--host-kv-mib", kind: "int",
+      label: "host kv MiB",
+      hint: "shared pinned Host KV (Main + backend) \u00b7 default 8192", min: 0 },
+    { id: "max_private_continuations", flag: "--max-private-continuations",
+      kind: "int", label: "private continuations",
+      hint: "descriptor capacity \u00b7 default 2\u00d7 max concurrency", min: 0 },
+    { id: "max_shared_prefixes", flag: "--max-shared-prefixes", kind: "int",
+      label: "shared prefixes",
+      hint: "descriptor capacity \u00b7 default max concurrency", min: 0 },
+    { id: "max_long_anchors_per_continuation",
+      flag: "--max-long-anchors-per-continuation", kind: "int",
+      label: "long anchors / continuation",
+      hint: "private long-anchor limit \u00b7 default 2", min: 0 },
+    { id: "context_cost_presets", flag: "--context-cost-presets", kind: "text",
+      label: "context-cost presets",
+      hint: "optional preset registry file \u00b7 default: generic + compiled" },
   ]},
   { title: "Speculative", desc: "omitting --spec loads neither backend", fields: [
     { id: "spec", flag: "--spec", kind: "enum",
@@ -63,6 +88,10 @@ const CFG_SECTIONS = [
       hint: "default: thinking on" },
     { id: "preserve_thinking", flag: "--preserve-thinking", kind: "bool",
       label: "preserve thinking", hint: "keep closed-turn reasoning in prompts" },
+    { id: "default_thinking_budget", flag: "--default-thinking-budget",
+      kind: "int", label: "default thinking budget",
+      hint: "tokens \u00b7 thinking-enabled requests only \u00b7 unset: unlimited",
+      min: 1 },
     { id: "no_cuda_graph", flag: "--no-cuda-graph", kind: "bool",
       label: "no CUDA graph", hint: "default: graphs on" },
     { id: "no_prefix_reuse", flag: "--no-prefix-reuse", kind: "bool",
@@ -140,6 +169,7 @@ function cfgDefaultValues() {
   };
   for (const sec of CFG_SECTIONS) for (const f of sec.fields) {
     if (f.id === "kv_capacity" || f.id === "kv_capacity_value") continue;
+    if (f.target) continue;  // binary/artifact/host/port keep the defaults above
     v[f.id] = (f.kind === "bool") ? false
       : (f.kind === "enum" ? (f.default || "") : "");
   }
@@ -235,7 +265,7 @@ function cfgValidate(v) {
     errs.push("port: must be an integer 1..65535");
   for (const sec of CFG_SECTIONS) for (const f of sec.fields) {
     if (f.kind === "bool" || f.kind === "kv" || f.kind === "enum" ||
-        f.target) continue;
+        f.kind === "text" || f.target) continue;
     if (f.id === "kv_capacity_value") {
       if (v.kv_capacity === "num" &&
           !(Number.isInteger(+v.kv_capacity_value) && +v.kv_capacity_value >= 1))
@@ -264,6 +294,18 @@ function cfgValidate(v) {
     warns.push("DFlash is 35B-A3B text-only and cannot be combined with --vision");
   if (v.greedy && v.temperature !== "")
     warns.push("--greedy forces temperature 0; the temperature override is ignored");
+  if (v.no_prefix_reuse) {
+    // serve_options rejects --no-prefix-reuse with any explicit context-cache
+    // capacity flag (zero-valued included)
+    for (const id of ["device_state_slots", "host_state_slots", "host_kv_mib",
+                      "max_private_continuations", "max_shared_prefixes",
+                      "max_long_anchors_per_continuation"])
+      if (v[id] !== "" && v[id] != null) {
+        errs.push("--no-prefix-reuse cannot be combined with context-cache " +
+                  "capacity flags");
+        break;
+      }
+  }
   return { errs, warns };
 }
 
