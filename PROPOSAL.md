@@ -11,7 +11,7 @@ view, and a top-bar (GNOME) tray icon exposes status + start/stop.
 
 ### 1.1 Launching a server
 
-- Binary: `/home/kyle/ninfer/build/apps/ninfer-serve` (built, ~150 MB).
+- Binary: `.../ninfer-serve` (built, ~150 MB).
 - Invocation: `ninfer-serve <artifact.ninfer> [flags...]`. Full option contract documented in
   `docs/serving.md` (§Server options); `--help` matches it.
 - Key flags for the config UI (subset, grouped):
@@ -302,3 +302,66 @@ ninfer-view/
   bar + tray amber state are specifically for it.
 - v1 = one supervised instance per daemon. Profiles make switching artifacts/ports instant;
   multiple concurrent instances is a natural v2 extension (supervisor becomes a small dict).
+
+---
+
+## 8. Status
+
+**M0 + M1 + M2 complete** (JSONL log stream, attach, `/health`, request table, metrics, launch
+config form).
+
+- **M0** delivered the vertical slice: profile → spawn → live view → clean stop.
+- **M1** made the **log stream fed only by the child's `--request-log-jsonl` file** (schema v10
+  — the authoritative, unrounded source per `docs/serving.md`), added **attach mode** for
+  externally launched instances, and added a **`/health` poller** as liveness ground truth.
+- **M2** added the **request table** and **throughput/scheduler charts** — both aggregate the
+  *same* records the log pane consumes (backfill + SSE), so the server stays stateless and there
+  is no second data path.
+
+The dashboard has four tabs: **Log** (formatted JSONL), **Requests** (table), **Metrics** (two
+live charts), **Config** (launch command form).
+
+Not yet in (M3+): tray icon.
+
+## 9. Working notes
+
+- **The log stream is JSONL-only.** The JSONL is the authoritative source (unrounded timings,
+  full counters); the rounded stderr summaries are kept only for the state machine, the
+  progress bar, and the `stderr.log` artifact in each run dir.
+- **`server_start` arrives only after the model is loaded** (the child writes it at Engine
+  attach), so the log pane is intentionally quiet while loading.
+- **M2 (table + charts) is computed in the browser** from the very same records the log pane
+  renders — there is no second server-side aggregate and no extra endpoint. Throughput rates are
+  `tokens / interval_seconds` (the per-interval counters, not cumulative). Because it runs
+  client-side, the table/charts only cover records the browser has seen (the 4000-event backfill
+  ring + the live stream); refreshing the page re-backfills from `/api/logs`.
+- **Metrics x-axis** is a **rolling window** (~2 min = 24 intervals, paces from the server's
+  `--log-stats-interval-ms`, read from `server_start`) whose right edge is anchored to the
+  latest sample and advances at the **log input rate**: while data flows it follows the newest
+  entry, and while the server is idle it keeps stepping forward — one interval of axis per
+  interval of real time — so the chart scrolls at exactly the pace it had while following the
+  input (never faster, never frozen). A line is never drawn across an idle gap (a resample
+  starts a fresh segment). The *Throughput* chart puts prefill and decode on **separate y-axes**
+  (prefill left, decode right) so a prefill spike can't squash the decode line.
+- **Config form** is built from the "Server options" table in `docs/serving.md` (target, sizing,
+  speculative, behavior, limits, sampling). Fields show documented defaults (empty = server
+  default); a live *launch command* preview shows the exact argv (including the per-run
+  `--request-log-jsonl` ninfer-view injects); range/consistency validation is enforced
+  (e.g. concurrency 1..8, draft-tokens 1..5 MTP / 1..15 DFlash, dflash×vision warning). Flags the
+  form doesn't know are preserved verbatim in an *extra flags* box, so round-trips never lose
+  anything. **Start** persists unsaved form edits first, then launches the selected profile, so
+  the launch always matches the preview.
+- **Dashboard binds 127.0.0.1 only; no auth** (local tool). The served instance's `--api-key`
+  (if any) is never needed by the dashboard: `/health` and the logs are unauthenticated.
+- **Stopping during model load**: `ninfer-serve` installs its SIGINT handler only after load +
+  warmup (see `apps/serve/main.cpp`), so a Stop in the `LOADING` phase terminates the child by
+  the default signal action (reported exit code −2, not 0). The supervisor still records this as
+  a clean stop; by the `RUNNING` phase SIGINT always yields a graceful exit 0.
+- **Start/stop are serialized** by a dedicated action lock (`Service.action_lock`) held across
+  the whole action — two fast `POST /api/start` calls (UI + tray) cannot both pass the state
+  check and spawn two children.
+- **One supervised instance per daemon (v1).** Profiles make switching artifact/port instant;
+  multi-instance is a v2 extension.
+- **Attach mode observes, it never controls.** The attached instance is not spawned by us, so
+  Stop becomes Detach (no SIGINT); health `down` only means `/health` stopped answering — the
+  process may still be alive mid-restart.
