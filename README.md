@@ -115,8 +115,17 @@ ninfer_view/
 │                     (+ NINFER_VIEW_HOME, NINFER_SERVE_BINARY, NINFER_SERVE_ARTIFACT)
 └── httpd.py          ThreadingHTTPServer: REST + SSE + static dashboard
 web/
-└── index.html        single-file dashboard (no build step): JSONL formatters, attach form,
-                      health chip, request table + canvas charts, launch config form
+├── index.html        dashboard markup: status header, attach form, progress bar, tab panes;
+│                     loads the js/ scripts in document order
+├── style.css         dashboard styling
+└── js/               classic scripts, no build step, no ES modules — shared global scope,
+                      loaded util -> log -> requests -> charts -> config -> main
+    ├── util.js       shared utilities, formatters, client-side model state
+    ├── log.js        log pane: record formatters (schema v10), live log view
+    ├── requests.js   request table: rows, "waiting" attribution, filtering, summary line
+    ├── charts.js     metrics: rolling-window canvas line charts over the throughput series
+    ├── config.js     launch command form: profile fields + extra_flags, argv preview
+    └── main.js       state header, SSE stream, header controls, tab switching, boot
 tests/
 ├── fake_ninfer_serve.py      fake binary: real stderr + realistic JSONL
 ├── fake_external_instance.py fake external instance (health + JSONL writer)
