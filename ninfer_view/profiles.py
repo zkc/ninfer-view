@@ -3,6 +3,12 @@
 Default home: ~/.config/ninfer-view. Override with NINFER_VIEW_HOME
 (e.g. NINFER_VIEW_HOME=/tmp/nv → /tmp/nv/profiles.json).
 
+The built-in default profile takes its binary and artifact from
+NINFER_SERVE_BINARY (absolute path to the ninfer-serve binary) and
+NINFER_SERVE_ARTIFACT (absolute path to the .ninfer artifact). Unset →
+the default profile seeds with no binary/artifact; set them in the
+Config tab (or via the env vars) before launching.
+
 A profile is a dict:
     {
       "id": "default",
@@ -26,12 +32,15 @@ CONFIG_DIR = Path(os.environ.get("NINFER_VIEW_HOME",
                                  str(Path.home() / ".config" / "ninfer-view")))
 PROFILES_PATH = CONFIG_DIR / "profiles.json"
 
-# Known-good launch from /home/kyle/ninfer/ninfer serve.txt
+DEFAULT_BINARY = os.environ.get("NINFER_SERVE_BINARY", "")
+
+DEFAULT_ARTIFACT = os.environ.get("NINFER_SERVE_ARTIFACT", "")
+
 DEFAULT_PROFILE: dict = {
     "id": "default",
     "name": "qwen3.8-27b (port 8081)",
-    "binary": "/home/kyle/ninfer/build/apps/ninfer-serve",
-    "artifact": "/home/kyle/ninfer/models/qwen3_8_27b_nvfp4.ninfer",
+    "binary": DEFAULT_BINARY,
+    "artifact": DEFAULT_ARTIFACT,
     "host": "127.0.0.1",
     "port": 8081,
     "extra_flags": [
@@ -63,6 +72,10 @@ class Profiles:
 
     def all(self) -> dict[str, dict]:
         return {k: dict(v) for k, v in self._profiles.items()}
+
+    def default_binary(self) -> str:
+        """Binary the default profile seeds from (NINFER_SERVE_BINARY)."""
+        return str(DEFAULT_PROFILE.get("binary") or "")
 
     def get(self, profile_id: str = "default") -> dict | None:
         p = self._profiles.get(profile_id)

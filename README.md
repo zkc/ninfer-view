@@ -34,11 +34,11 @@ python3 -m ninfer_view --load          # also load the model (default profile) a
 ```
 
 The dashboard always injects `--host`, `--port`, and `--request-log-jsonl` itself. The
-built-in default profile launches your known-good instance:
+default profile uses launch settings shown here:
 
 ```
 .../ninfer-serve
-    ...ninfer/models/qwen3_8_27b_nvfp4.ninfer
+    .../ninfer/models/qwen3_8_27b_nvfp4.ninfer
     --host 127.0.0.1 --port 8081
     --max-context 262144 --max-concurrency 2 --kv-dtype int8
     --spec mtp --draft-tokens 3 --lm-head-draft
@@ -51,6 +51,10 @@ through the form and previews the exact command before Start. Each run gets a fr
 
 Set `NINFER_VIEW_HOME=/some/dir` to redirect both the config dir
 (`$NINFER_VIEW_HOME/profiles.json`) and the run dirs (`$NINFER_VIEW_HOME/runs/`).
+Set `NINFER_SERVE_BINARY=/abs/path/to/ninfer-serve` to give the built-in default
+profile a binary, and `NINFER_SERVE_ARTIFACT=/abs/path/to/model.ninfer` to give it an
+artifact; without either, the default profile seeds with that field empty, so fill it
+in from the Config tab (the form pre-fills the binary field from this variable).
 
 ## API (127.0.0.1 only)
 
@@ -107,7 +111,8 @@ ninfer_view/
 ├── health.py         /health poller (liveness ground truth)
 ├── state.py          EventBus (SSE fan-out + JSONL ring buffer) + state machine
 ├── supervisor.py     spawn child, tee stderr, SIGINT stop, exit watch
-├── profiles.py       ~/.config/ninfer-view/profiles.json (+ NINFER_VIEW_HOME)
+├── profiles.py       ~/.config/ninfer-view/profiles.json
+│                     (+ NINFER_VIEW_HOME, NINFER_SERVE_BINARY, NINFER_SERVE_ARTIFACT)
 └── httpd.py          ThreadingHTTPServer: REST + SSE + static dashboard
 web/
 └── index.html        single-file dashboard (no build step): JSONL formatters, attach form,

@@ -5,7 +5,8 @@ Routes (bound to 127.0.0.1 only; local tool, no auth):
     GET  /style.css, /js/*.js  static dashboard assets under web/
     GET  /api/state       state snapshot
     GET  /api/logs        recent JSONL log events (backfill)
-    GET  /api/profiles    saved launch profiles
+    GET  /api/profiles    saved launch profiles (+ default_binary from
+                           NINFER_SERVE_BINARY, for the form's fallback)
     POST /api/profiles    upsert a profile
     POST /api/start       {profile_id}
     POST /api/stop
@@ -104,7 +105,8 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 500
             self._json({"logs": self.service.bus.recent_logs(limit)})
         elif path == "/api/profiles":
-            self._json({"profiles": self.service.profiles.all()})
+            self._json({"profiles": self.service.profiles.all(),
+                        "default_binary": self.service.profiles.default_binary()})
         elif path == "/api/stream":
             self._sse()
         elif path.startswith("/api/"):

@@ -11,7 +11,7 @@
 const CFG_SECTIONS = [
   { title: "Target", desc: "what runs where", fields: [
     { id: "binary",   kind: "text", target: "binary",   label: "binary",
-      hint: "path to the ninfer-serve binary" },
+      hint: "path to the ninfer-serve binary \u00b7 default: $NINFER_SERVE_BINARY" },
     { id: "artifact", kind: "text", target: "artifact", label: "artifact",
       hint: "path to the .ninfer artifact" },
     { id: "host",     kind: "text", target: "host",     label: "host",
@@ -157,9 +157,11 @@ function cfgQuote(s) {
   return /[\s"'\\]/.test(s) ? "'" + s.replace(/'/g, "'\\''") + "'" : s;
 }
 
+let cfgDefaultBinary = "";
+
 function cfgDefaultValues() {
   const v = {
-    binary: "/home/kyle/ninfer/build/apps/ninfer-serve",
+    binary: cfgDefaultBinary,
     artifact: "",
     host: "127.0.0.1",
     port: "8080",
@@ -499,6 +501,7 @@ async function cfgLoadProfiles() {
     const r = await fetch("/api/profiles");
     const d = await r.json();
     if (d && d.profiles) cfg.profiles = d.profiles;
+    if (d && d.default_binary) cfgDefaultBinary = String(d.default_binary);
   } catch (e) { /* keep whatever we have */ }
   if (!cfg.profiles[cfg.id]) cfg.id = cfgProfileOrder()[0] || "default";
   cfgRebuildDropdown();

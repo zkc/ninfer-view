@@ -96,7 +96,7 @@ CASES = [
 
 # --- current (structured) format -------------------------------------------
 # These mirror real lines from ninfer-serve >= the structured-logging build,
-# e.g. /home/kyle/.local/state/ninfer-view/runs/20260902-001918-683821.
+# e.g. .../.local/state/ninfer-view/runs/20260902-001918-683821.
 
 NEW_CASES = [
     ("new: first startup line -> loading",
