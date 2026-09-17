@@ -19,8 +19,9 @@ import threading
 
 # One CSV row per GPU. The name is parsed from the MIDDLE of the line so a
 # comma inside a GPU name can't shift the numeric columns.
-QUERY = ("--query-gpu=index,name,memory.total,memory.used,memory.free,"
-         "utilization.gpu --format=csv,noheader,nounits")
+QUERY_FIELDS = ("index,name,memory.total,memory.used,memory.free,"
+                "utilization.gpu")
+QUERY_FORMAT = "csv,noheader,nounits"
 _TIMEOUT_S = 3.0
 
 
@@ -43,8 +44,11 @@ def sample_gpus() -> list[dict] | None:
     if not binary:
         return None
     try:
-        proc = subprocess.run([binary, QUERY], capture_output=True,
-                              text=True, timeout=_TIMEOUT_S)
+        proc = subprocess.run(
+            [binary,
+             "--query-gpu=" + QUERY_FIELDS,
+             "--format=" + QUERY_FORMAT],
+            capture_output=True, text=True, timeout=_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:

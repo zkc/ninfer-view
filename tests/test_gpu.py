@@ -20,10 +20,23 @@ from ninfer_view.gpu import GpuPoller, nvidia_smi_binary, sample_gpus
 
 
 def write_fake_nvidia_smi(d: Path, stdout: str = "", code: int = 0) -> str:
-    """Write an executable fake nvidia-smi printing `stdout`, exiting `code`."""
+    """Write an executable fake nvidia-smi printing `stdout`, exiting `code`.
+
+    The fake validates its argv like the real binary: it expects exactly
+    ``--query-gpu=<fields>`` and ``--format=csv,noheader,nounits`` as SEPARATE
+    arguments and fails with exit code 2 otherwise — the same failure mode
+    the real nvidia-smi produces when the two are accidentally merged into
+    one argv entry.
+    """
     p = d / "nvidia-smi"
     p.write_text("#!/usr/bin/env python3\n"
                  "import sys\n"
+                 "a = sys.argv[1:]\n"
+                 "if not (len(a) == 2 and a[0].startswith('--query-gpu=')\n"
+                 "        and '--format' not in a[0]\n"
+                 "        and a[1] == '--format=csv,noheader,nounits'):\n"
+                 "    sys.stdout.write('invalid arguments: %r\\n' % (a,))\n"
+                 "    sys.exit(2)\n"
                  f"sys.stdout.write({stdout!r})\n"
                  f"sys.exit({code})\n")
     p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -89,6 +102,26 @@ def test_sample_none_when_binary_missing_or_fails():
         with with_fake(fake):
             assert sample_gpus() is None          # unparseable output
     print("ok   test_sample_none_when_binary_missing_or_fails")
+
+
+def test_merged_query_arg_rejected():
+    """Regression: the query and format must be SEPARATE argv entries.
+
+    subprocess.run does no shell word-splitting, so joining them with a
+    space passes ONE argument; nvidia-smi then treats everything after
+    ``--query-gpu=`` (including ``--format=csv``) as a field list and
+    exits 2 with 'Field "utilization.gpu --format=csv" is not a valid
+    field to query'. The fake reproduces exactly this failure mode.
+    """
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        fake = write_fake_nvidia_smi(Path(td), "0, G, 100, 50, 50, 1\n")
+        proc = subprocess.run(
+            [fake, "--query-gpu=index --format=csv,noheader,nounits"],
+            capture_output=True, text=True)
+        assert proc.returncode == 2, proc
+        assert "invalid arguments" in proc.stdout, proc.stdout
+    print("ok   test_merged_query_arg_rejected")
 
 
 def test_binary_resolution():
@@ -165,6 +198,7 @@ if __name__ == "__main__":
     test_sample_single_gpu()
     test_sample_multi_gpu_and_comma_in_name()
     test_sample_none_when_binary_missing_or_fails()
+    test_merged_query_arg_rejected()
     test_binary_resolution()
     test_poller_lifecycle()
     test_poller_survives_callback_errors()
