@@ -65,6 +65,7 @@ button.danger { background: #42191b; border-color: #f8514966; color: var(--red);
 #health { font-size: 12px; color: var(--dim); }
 #health.up { color: var(--green); }
 #health.down { color: var(--red); }
+#gpu { font-size: 12px; color: var(--dim); font-family: var(--mono); }
 
 #tabbar { display: flex; gap: 4px; padding: 0 16px; background: var(--panel);
   border-bottom: 1px solid var(--border); }

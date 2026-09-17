@@ -4,6 +4,23 @@
 
 // ---- state header ---------------------------------------------------------
 
+// VRAM chip: live nvidia-smi sample (gpu SSE events every ~5 s while an
+// instance is active; snapshot().gpu rehydrates it after a refresh).
+// MiB values are shown as GB (1 GB = 1024 MiB, matching nvidia-smi's own
+// units). Multi-GPU: one segment per GPU; single GPU gets the "VRAM" prefix.
+function renderGpu() {
+  const g = $("gpu");
+  const list = lastState.gpu;
+  if (!list || !list.length) { g.textContent = ""; return; }
+  const gb = (mib) => (mib / 1024).toFixed(1);
+  const bits = list.map((x) => (list.length > 1 ? "GPU" + x.index + ": " : "")
+    + gb(x.used_mib) + "/" + gb(x.total_mib) + " GB"
+    + " \u00b7 free " + gb(x.free_mib) + " GB");
+  g.textContent = (list.length > 1 ? "" : "VRAM ") + bits.join(" \u00b7 ");
+  g.title = list.map((x) => "GPU" + x.index + " " + x.name
+    + " (" + x.util_pct + "% util)").join("\n");
+}
+
 function applyState(s) {
   lastState = s || lastState;
   const st = lastState.state || "stopped";
@@ -20,6 +37,8 @@ function applyState(s) {
   const hEl = $("health");
   hEl.textContent = lastState.health ? "health: " + lastState.health : "";
   hEl.className = lastState.health || "";
+
+  renderGpu();
 
   const bits = [];
   if (lastState.model_id) bits.push("<b>" + lastState.model_id + "</b>");
@@ -72,6 +91,12 @@ const LOG_KINDS = ["server_start", "request_start", "request_rejected",
 function connect() {
   const es = new EventSource("/api/stream");
   es.addEventListener("state", (ev) => { applyState(JSON.parse(ev.data)); tick(); });
+  es.addEventListener("gpu", (ev) => {
+    // VRAM sample (every ~5 s while active); no state change rides with it.
+    const d = JSON.parse(ev.data);
+    lastState.gpu = d.gpus;
+    renderGpu();
+  });
   for (const kind of LOG_KINDS) {
     es.addEventListener(kind, (ev) => {
       const d = JSON.parse(ev.data);

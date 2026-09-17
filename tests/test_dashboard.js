@@ -405,6 +405,24 @@ const tick = () => new Promise((r) => setImmediate(r));
   console.assert(/active 1/.test(sumW) && /waiting 0/.test(sumW),
     "waiting not cleared when the scheduler count drops: " + sumW);
 
+  // --- VRAM chip -----------------------------------------------------------
+  // a gpu SSE event updates the header chip live (no state change rides
+  // with it); MiB is rendered as GB (1024 MiB per GB)
+  const gpuEl = getEl("gpu");
+  console.assert(gpuEl.textContent === "",
+    "gpu chip should be empty with no sample, got: " + gpuEl.textContent);
+  es._l.gpu({ data: JSON.stringify({ kind: "gpu", seq: 99,
+    gpus: [{ index: 0, name: "NVIDIA H100 80GB HBM3",
+             total_mib: 81559, used_mib: 20480, free_mib: 61079,
+             util_pct: 87 }] }) });
+  await tick();
+  console.assert(gpuEl.textContent.includes("VRAM 20.0/79.6 GB"),
+    "gpu chip wrong: " + gpuEl.textContent);
+  console.assert(gpuEl.textContent.includes("free 59.6 GB"),
+    "gpu chip free wrong: " + gpuEl.textContent);
+  console.assert(gpuEl.title.includes("NVIDIA H100 80GB HBM3"),
+    "gpu chip title missing GPU name");
+
   // --- config tab -----------------------------------------------------------
   const findFid = (root, fid) => {
     const stack = [root];

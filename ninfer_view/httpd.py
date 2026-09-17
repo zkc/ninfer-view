@@ -10,7 +10,7 @@ Routes (bound to 127.0.0.1 only; local tool, no auth):
     POST /api/profiles    upsert a profile
     POST /api/start       {profile_id}
     POST /api/stop
-    GET  /api/stream      SSE: state | server_start | request_start |
+    GET  /api/stream      SSE: state | gpu | server_start | request_start |
                            request_rejected | request_done | request_error |
                            throughput
     POST /api/attach      {host, port, jsonl_path} — observe an external
@@ -18,6 +18,9 @@ Routes (bound to 127.0.0.1 only; local tool, no auth):
     POST /api/detach      stop observing
 Log stream: the /api/logs and /api/stream log events come only from the
 child's --request-log-jsonl file (schema v10); stderr never enters them.
+The /api/state snapshot carries ``gpu`` (latest nvidia-smi VRAM sample or
+null); while an instance is active a ``gpu`` event arrives on /api/stream
+every ~5 s with the fresh sample.
 """
 
 from __future__ import annotations

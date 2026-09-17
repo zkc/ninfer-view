@@ -24,6 +24,10 @@ Attach mode (external instance we do not own):
     stopped/crashed -> attached -> (detach) -> stopped
 An attached instance is observed through its JSONL file (live-only,
 seek_end) plus a /health poller. No child, no stderr, no progress bar.
+
+In both modes, VRAM is sampled from nvidia-smi while an instance is
+active (GpuPoller in gpu.py); each sample publishes a ``gpu`` event and
+is replayed in the state snapshot.
 """
 
 from __future__ import annotations
@@ -108,6 +112,8 @@ class Service:
         self.health: str | None = None          # "up" | "down" | None (unknown)
         self.attached = False                    # observing an external instance
         self.jsonl_path: str | None = None       # JSONL being tailed (any mode)
+        self.gpu: list[dict] | None = None       # latest nvidia-smi VRAM sample
+        self.gpu_poller = None                   # GpuPoller (any active mode)
 
     # -- actions ---------------------------------------------------------
 
@@ -135,6 +141,7 @@ class Service:
             self.pid = None
             self.health = None
             self.attached = False
+            self.gpu = None
             self.supervisor = Supervisor(self)
             self.jsonl_tailer = None
             ok, msg = self.supervisor.start(profile)
@@ -149,6 +156,7 @@ class Service:
             self.jsonl_tailer = JsonlTailer(self.supervisor.jsonl_path,
                                             self._on_jsonl_event)
             self.jsonl_tailer.start()
+            self._start_gpu_poller()
             self._set_state("starting")
             return True, None
 
@@ -197,6 +205,7 @@ class Service:
             self.started_at = time.time()
             self.health = "down"  # updated by the first poll within ~2 s
             self.attached = True
+            self.gpu = None
             self.endpoint = f"http://{host}:{port}"
             self.jsonl_path = jsonl_path
             from .health import HealthPoller
@@ -207,6 +216,7 @@ class Service:
             self.health_poller = HealthPoller(
                 f"{self.endpoint}/health", self._on_health)
             self.health_poller.start()
+            self._start_gpu_poller()
             self._set_state("attached")
             return True, None
 
@@ -215,6 +225,7 @@ class Service:
             if not self.attached:
                 return False, "not attached"
             self._stop_health_poller()
+            self._stop_gpu_poller()
             if self.jsonl_tailer is not None:
                 self.jsonl_tailer.stop()
                 self.jsonl_tailer = None
@@ -223,6 +234,7 @@ class Service:
             self.jsonl_path = None
             self.health = None
             self.model_id = None
+            self.gpu = None
             self._set_state("stopped")
             return True, None
 
@@ -230,6 +242,30 @@ class Service:
         if self.health_poller is not None:
             self.health_poller.stop()
             self.health_poller = None
+
+    def _start_gpu_poller(self) -> None:
+        """Poll nvidia-smi while an instance is active (any mode).
+
+        VRAM is always a property of this machine's GPU(s), so attach mode
+        polls it too (the observed instance's KV cache still lands on the
+        local GPU when the instance runs here).
+        """
+        if self.gpu_poller is not None and self.gpu_poller.alive():
+            return
+        from .gpu import GpuPoller
+        self.gpu_poller = GpuPoller(self._on_gpu)
+        self.gpu_poller.start()
+
+    def _stop_gpu_poller(self) -> None:
+        if self.gpu_poller is not None:
+            self.gpu_poller.stop()
+            self.gpu_poller = None
+
+    def _on_gpu(self, gpus: list[dict] | None) -> None:
+        """GpuPoller callback: keep the latest sample, push it live."""
+        with self.lock:
+            self.gpu = gpus
+        self.bus.publish({"kind": "gpu", "gpus": gpus})
 
     # -- callbacks from the supervisor -----------------------------------
 
@@ -293,7 +329,9 @@ class Service:
             self.jsonl_tailer.stop()
             self.jsonl_tailer = None
         self._stop_health_poller()
+        self._stop_gpu_poller()
         self.pid = None
+        self.gpu = None
         if stopping or code == 0:
             self._set_state("stopped", exit_code=code)
         else:
@@ -331,6 +369,7 @@ class Service:
                 "run_dir": self.run_dir,
                 "pid": self.pid,
                 "health": self.health,
+                "gpu": self.gpu,
                 "attached": self.attached,
                 "jsonl_path": self.jsonl_path,
             }

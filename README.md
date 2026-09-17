@@ -24,6 +24,10 @@ See `PROPOSAL.md` for the full design, milestone plan, status, and implementatio
     documented defaults), plus a live argv preview of the exact command that will run.
 - **Profiles** — saved launch configs in `~/.config/ninfer-view/profiles.json`; switching
   artifact/port is instant.
+- **VRAM chip** — live GPU memory readout in the status header (used/total and free, per
+  GPU), sampled from `nvidia-smi` every 5 s while an instance is active (supervised or
+  attached). Needs the NVIDIA driver; on other hardware — or with the driver absent — the
+  chip simply stays empty.
 
 ## Run
 
@@ -55,14 +59,16 @@ Set `NINFER_SERVE_BINARY=/abs/path/to/ninfer-serve` to give the built-in default
 profile a binary, and `NINFER_SERVE_ARTIFACT=/abs/path/to/model.ninfer` to give it an
 artifact; without either, the default profile seeds with that field empty, so fill it
 in from the Config tab (the form pre-fills the binary field from this variable).
+Set `NINFER_VIEW_NVIDIA_SMI=/abs/path/to/nvidia-smi` to override which binary the
+VRAM sampler runs (defaults to `nvidia-smi` on `PATH`).
 
 ## API (127.0.0.1 only)
 
 ```
 GET  /                  dashboard (status header, progress bar, tabbed content, health chip)
-GET  /api/state         snapshot: state, health up|down, attached, jsonl_path, ...
+GET  /api/state         snapshot: state, health up|down, attached, gpu (nvidia-smi sample), ...
 GET  /api/logs          JSONL backfill
-GET  /api/stream        SSE: state + the six schema-v10 events
+GET  /api/stream        SSE: state + gpu + the six schema-v10 events
 POST /api/start         launch the selected profile
 POST /api/stop          SIGINT-stop the child
 POST /api/attach        {host, port, jsonl_path} — observe an external instance
@@ -72,7 +78,9 @@ POST /api/profiles      save a launch config
 ```
 
 `/api/stream` emits the schema-v10 events `server_start`, `request_start`, `request_rejected`,
-`request_done`, `request_error`, and `throughput`; state events publish only on change. While
+`request_done`, `request_error`, and `throughput`; state events publish only on change. A
+`gpu` event carries a fresh nvidia-smi sample (`{gpus: [{index, name, total_mib, used_mib,
+free_mib, util_pct}, ...]}` or `gpus: null`) every ~5 s while an instance is active. While
 attached, Start/Attach are disabled and Stop becomes **Detach**.
 
 ## Testing
@@ -83,6 +91,7 @@ Automated tests (no ninfer needed):
 python3 tests/test_console_parse.py
 python3 tests/test_jsonl_tail.py
 python3 tests/test_health.py
+python3 tests/test_gpu.py
 node tests/test_dashboard.js
 ```
 
@@ -109,6 +118,7 @@ ninfer_view/
 ├── console_parse.py  stderr line → typed event (drives the state machine only)
 ├── jsonl_tail.py     append-follower for requests.jsonl (schema v10)
 ├── health.py         /health poller (liveness ground truth)
+├── gpu.py            nvidia-smi VRAM sampler + 5 s poller (header chip; NINFER_VIEW_NVIDIA_SMI)
 ├── state.py          EventBus (SSE fan-out + JSONL ring buffer) + state machine
 ├── supervisor.py     spawn child, tee stderr, SIGINT stop, exit watch
 ├── profiles.py       ~/.config/ninfer-view/profiles.json
@@ -132,5 +142,6 @@ tests/
 ├── test_console_parse.py     stderr parser tests
 ├── test_jsonl_tail.py        tailer tests (live append, partial lines, seek_end, crashes)
 ├── test_health.py            health poller tests
+├── test_gpu.py               nvidia-smi sampler tests (fake nvidia-smi executable)
 └── test_dashboard.js         dashboard script in a stub DOM (table + charts + config form)
 ```
