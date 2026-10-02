@@ -185,6 +185,124 @@ NEW_CASES = [
 
 CASES += NEW_CASES
 
+# --- pretty format (latest product-logging build) ---------------------------
+# Real-shaped lines from the current ninfer-serve:
+#   YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message   (LEVEL is a 5-char token)
+PTS = "2026-09-02 23:12:56.607"
+
+
+def P(level: str, msg: str) -> str:
+    return f"{PTS}  {level:<5} {msg}"
+
+
+PRETTY_CASES = [
+    ("pretty: starting engine -> loading",
+     P("INFO", "starting engine"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "loading"
+               and e["ts"] == PTS and e["level"] == "info"),
+    ("pretty: weights begin -> progress 0%",
+     P("INFO", "loading weights | 19.73 GiB"),
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["phase"] == "loading weights"
+               and e["progress"]["percent"] == 0.0
+               and e["progress"]["total"] == "19.73 GiB"
+               and e["progress"]["done"] == "0 B"),
+    ("pretty: weights progress record -> pct",
+     P("INFO", "  loading weights 43.2% | 8.52 GiB/19.73 GiB"
+               " | 1.31 GiB/s | ETA 9.1s"),
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["percent"] == 43.2
+               and e["progress"]["done"] == "8.52 GiB"
+               and e["progress"]["total"] == "19.73 GiB"),
+    ("pretty: weights complete -> progress 100%",
+     P("INFO", "weights ready | 19.73 GiB | 9.5s | 2.08 GiB/s"),
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["percent"] == 100.0
+               and e["progress"]["done"] == "19.73 GiB"
+               and e["progress"]["total"] == "19.73 GiB"
+               and abs(e["progress"]["elapsed_s"] - 9.5) < 1e-9),
+    ("pretty: host state begin -> progress 0%",
+     P("INFO", "pinning host state | 1.00 GiB"),
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["phase"] == "pinning host state"
+               and e["progress"]["percent"] == 0.0
+               and e["progress"]["total"] == "1.00 GiB"),
+    ("pretty: host KV complete -> progress 100%",
+     P("INFO", "host KV pinned | 2.00 GiB | 150 ms"),
+     lambda e: e["kind"] == "progress"
+               and e["progress"]["percent"] == 100.0
+               and abs(e["progress"]["elapsed_s"] - 0.15) < 1e-9),
+    ("pretty: engine ready -> loaded + model",
+     P("INFO", "engine ready | qwen3.8-27b | total 10.5s"
+               " | weights 19.73 GiB | CUDA sync off"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "loaded"
+               and e["model_id"] == "qwen3.8-27b"
+               and abs(e["load_seconds"] - 10.5) < 1e-9),
+    ("pretty: capacity -> kv",
+     P("INFO", "capacity | KV 245,000 tokens, int8, auto"
+               " | pages 3,828/4,096 | runtime 1.00 GiB | free 2.00 GiB"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "kv"),
+    ("pretty: warmup complete -> warming",
+     P("INFO", "warmup complete | 1.0s"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "warming"),
+    ("pretty: listening -> listening",
+     P("INFO", "listening on http://127.0.0.1:8081"
+               " | model qwen3.8-27b | auth disabled"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "listening"
+               and e["endpoint"] == "http://127.0.0.1:8081"
+               and e["model_id"] == "qwen3.8-27b"
+               and e["auth"] == "disabled"),
+    ("pretty: listening bearer",
+     P("INFO", "listening on http://0.0.0.0:9090 | model m | auth bearer"),
+     lambda e: e["kind"] == "lifecycle" and e["auth"] == "bearer"
+               and e["endpoint"] == "http://0.0.0.0:9090"),
+    ("pretty: throughput -> activity",
+     P("INFO", "throughput | 5.0s | decode 190.6 tok/s (953 tok)"
+               " | running 1 (decode-ready 1) | batch 1.00"
+               " | host 1.5% (73.4 ms)"),
+     lambda e: e["kind"] == "activity"),
+    ("pretty: req started -> activity",
+     P("INFO", "req#13 started | openai-chat non-stream | 2 messages"
+               " | max output 8,192 | thinking medium"),
+     lambda e: e["kind"] == "activity"),
+    ("pretty: req done -> activity",
+     P("INFO", "req#13 done | openai-chat | stop token | prompt 2,139"
+               " | output 54,088 | cache 129 (6.0%, turn closure)"
+               " | TTFT 323 ms | total 5m 21.0s"
+               " | prefill 6.49k tok/s | decode 169.0 tok/s"),
+     lambda e: e["kind"] == "activity"),
+    ("pretty: req rejected (warn) -> activity",
+     P("WARN", "req#2 rejected during prepare | openai-responses stream"
+               " | HTTP 400 | context length exceeded | messages 1"),
+     lambda e: e["kind"] == "activity" and e["level"] == "warning"),
+    ("pretty: startup failed (error)",
+     P("ERROR", "startup failed | planning runtime | 1.0s"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"
+               and e["level"] == "error"
+               and e["detail"].startswith("startup failed")),
+    ("pretty: warmup failed (fatal)",
+     P("FATAL", "warmup failed | 1.0s | out of memory"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"
+               and e["level"] == "critical"),
+    ("pretty: server failed during startup",
+     P("FATAL", "server failed during startup | cannot allocate engine"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"
+               and e["level"] == "critical"),
+    ("pretty: bind failure",
+     P("ERROR", "cannot bind 127.0.0.1:8081"),
+     lambda e: e["kind"] == "lifecycle" and e["phase"] == "failed"),
+    ("pretty: server stopped -> console",
+     P("INFO", "server stopped"),
+     lambda e: e["kind"] == "console" and e["ts"] == PTS),
+    ("pretty: context cache passes through",
+     P("INFO", "context cache | 2 active + 2 cached device states"
+               " | host 16 states, 24.00 GiB KV | private 32 | shared 8"),
+     lambda e: e["kind"] == "console" and e["ts"] == PTS
+               and e["level"] == "info"),
+]
+
+CASES += PRETTY_CASES
+
 
 def main():
     fails = 0

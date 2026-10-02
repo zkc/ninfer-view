@@ -10,7 +10,9 @@ See `PROPOSAL.md` for the full design, milestone plan, status, and implementatio
 ## Features
 
 - **Launch & control** — start/stop the server from a saved profile, with a live
-  load-progress bar and status header.
+  load-progress bar and a status header that follows the instance's `/health`
+  endpoint: the header flips to `RUNNING` the moment the engine answers, no matter
+  what the child's stderr format looks like.
 - **Attach mode** — observe an instance started outside ninfer-view (live JSONL tail +
   `/health` polling).
 - **Dashboard tabs**:
@@ -95,10 +97,13 @@ python3 tests/test_gpu.py
 node tests/test_dashboard.js
 ```
 
-A fake binary (`tests/fake_ninfer_serve.py`) mimics the real stderr lifecycle **and** emits
-realistic schema-v10 JSONL, so you can exercise the full lifecycle — progress bar,
-`server_start`, request lines, `THRU` every 5 s, clean SIGINT stop — in about 8 seconds instead
-of waiting on a real model load. Create a profile for it and start it from the **Config** tab:
+A fake binary (`tests/fake_ninfer_serve.py`) mimics the latest real binary — the current
+*pretty* stderr startup log, the real `/health` lifecycle (port bound at spawn, answering
+`{"status":"ok"}` only once the ready sequence completes), and realistic schema-v10 JSONL — so
+you can exercise the full lifecycle — progress bar, status header following `/health`,
+`server_start`, request lines, `THRU` every 5 s, clean SIGINT stop — in about 10 seconds
+instead of waiting on a real model load. Create a profile for it and start it from the
+**Config** tab:
 
 ```js
 fetch("/api/profiles", {method: "POST", headers: {"Content-Type": "application/json"},
@@ -115,9 +120,11 @@ writer) for the attach-mode test.
 ```
 ninfer_view/
 ├── __main__.py       CLI entry: python3 -m ninfer_view
-├── console_parse.py  stderr line → typed event (drives the state machine only)
+├── console_parse.py  stderr line → typed event (legacy, structured, and the latest
+│                     pretty formats; drives the state machine/progress bar only)
 ├── jsonl_tail.py     append-follower for requests.jsonl (schema v10)
-├── health.py         /health poller (liveness ground truth)
+├── health.py         /health poller (liveness ground truth; starts at spawn and promotes
+│                     the supervised instance to `running` when it first answers)
 ├── gpu.py            nvidia-smi VRAM sampler + 5 s poller (header chip; NINFER_VIEW_NVIDIA_SMI)
 ├── state.py          EventBus (SSE fan-out + JSONL ring buffer) + state machine
 ├── supervisor.py     spawn child, tee stderr, SIGINT stop, exit watch

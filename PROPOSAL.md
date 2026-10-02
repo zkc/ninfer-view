@@ -328,6 +328,19 @@ Not yet in (M3+): tray icon.
 - **The log stream is JSONL-only.** The JSONL is the authoritative source (unrounded timings,
   full counters); the rounded stderr summaries are kept only for the state machine, the
   progress bar, and the `stderr.log` artifact in each run dir.
+- **`running` follows `/health`, not just stderr.** The latest ninfer-serve emits a *pretty*
+  startup log (`YYYY-MM-DD HH:MM:SS.mmm  INFO  message`, `|`-separated clauses) that upstream
+  is "intentionally not parsed", so stderr can no longer be the only thing the state machine
+  trusts. The `/health` poller now starts at **spawn** (the endpoint is already known from the
+  profile — the supervisor injects `--host`/`--port`), and the first "up" promotes a supervised
+  instance out of its startup states to `running` (setting `running_at`). `/health` answers 2xx
+  only once the engine is loaded, warm, attached and listening, so this is exact. The console
+  parser still classifies the three stderr formats (legacy, structured `phase=... status=...`,
+  and the latest pretty clauses — weights progress, `engine ready`, `warmup complete`,
+  `listening on ...`) as best-effort hints for the `loading`/`warming` states, the progress
+  bar, the failure reason, and `model_id`; the `server_start` JSONL record backfills `model_id`
+  if stderr never provided it. The state machine can therefore never sit in a startup state
+  while the engine is ready, even if the log format changes again.
 - **`server_start` arrives only after the model is loaded** (the child writes it at Engine
   attach), so the log pane is intentionally quiet while loading.
 - **M2 (table + charts) is computed in the browser** from the very same records the log pane

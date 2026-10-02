@@ -12,12 +12,19 @@ the SSE log stream or the log backfill buffer.
 
 State flow (supervised, spawned by us):
     stopped -> starting -> loading -> warming -> running
-              (spawn)    (model     (warmup   (listening
-                          load)      line)     line)
-    (stderr is the legacy free-form format or the current structured
-    "startup phase=... status=..." format; both map to the same lifecycle
-    events. A structured "status=failed" line records the failure reason,
-    which the crashed state reports.)
+              (spawn)    (first    (warmup   (engine answers
+                          stderr)    line)     /health — the
+                                         liveness ground truth)
+    The `running` transition is driven by the /health poller, which starts
+    at spawn: the endpoint is already known from the profile (the
+    supervisor injects --host/--port), and /health answers 2xx only once
+    the engine is loaded, warm, attached and listening. stderr lifecycle
+    lines (legacy free-form, structured "startup phase=... status=...", or
+    the latest pretty "loading weights | ..." clauses) advance the earlier
+    states and the progress bar as a best effort — the newest builds emit
+    a pretty log that upstream is "intentionally not parsed" — but since
+    health is authoritative, the state machine can never sit in a startup
+    state while the engine is ready.
     any -> stopping (SIGINT sent) -> stopped (exit 0) | crashed (exit != 0)
 
 Attach mode (external instance we do not own):
@@ -41,6 +48,9 @@ import time
 # schema-v10 event types; these are the kinds that populate the log stream.
 LOG_KINDS = ("server_start", "request_start", "request_rejected",
              "request_done", "request_error", "throughput")
+
+# Transient supervised startup states; /health "up" promotes out of them.
+START_STATES = ("starting", "loading", "warming")
 
 
 class EventBus:
@@ -152,6 +162,16 @@ class Service:
             self.run_dir = str(self.supervisor.run_dir)
             self.pid = self.supervisor.pid
             self.jsonl_path = str(self.supervisor.jsonl_path)
+            # The endpoint is known at launch (the supervisor injects
+            # --host/--port from this same profile), so the /health poller
+            # starts with the child: readiness is ground truth, independent
+            # of what the child's stderr format happens to be.
+            self.endpoint = f"http://{profile.get('host', '127.0.0.1')}:" \
+                            f"{profile.get('port', 8080)}"
+            from .health import HealthPoller
+            self.health_poller = HealthPoller(
+                f"{self.endpoint}/health", self._on_health)
+            self.health_poller.start()
             from .jsonl_tail import JsonlTailer
             self.jsonl_tailer = JsonlTailer(self.supervisor.jsonl_path,
                                             self._on_jsonl_event)
@@ -287,11 +307,14 @@ class Service:
             elif phase == "warming" and self.state in ("starting", "loading"):
                 self._set_state("warming")
             elif phase == "listening":
+                # stderr fast path: the pretty/structured "ready" line
+                # lands a hair before /health first answers, so this
+                # usually wins the race to `running`. If the child's log
+                # format changes again and this never parses, the health
+                # poller (running since spawn) promotes the state instead.
                 self.model_id = ev.get("model_id")
                 self.endpoint = ev.get("endpoint")
                 self.running_at = time.time()
-                # Ground-truth liveness from here on: /health answers only
-                # when the server actually accepts requests.
                 from .health import HealthPoller
                 if self.health_poller is None:
                     self.health_poller = HealthPoller(
@@ -310,18 +333,45 @@ class Service:
                     self.bus.publish({"kind": "state", **self.snapshot()})
 
     def _on_health(self, ok: bool) -> None:
-        """Health poller callback (any mode); publishes only on change."""
+        """Health poller callback (any mode).
+
+        /health answers 2xx only while the engine can accept work, so an
+        "up" while a supervised instance is still in a startup state means
+        the model has started: promote to running (that is the ground
+        truth the status header follows). Otherwise publishes only on a
+        health value change (chip update).
+        """
         value = "up" if ok else "down"
         with self.lock:
             if self.state == "stopped":
                 return
-            if self.health == value:
-                return
+            changed = self.health != value
             self.health = value
-        self.bus.publish({"kind": "state", **self.snapshot()})
+            promote = ok and self.state in START_STATES \
+                and self.running_at is None
+        if promote:
+            self._set_state("running", running_at=time.time())
+        elif changed:
+            self.bus.publish({"kind": "state", **self.snapshot()})
 
     def _on_jsonl_event(self, rec: dict) -> None:
-        """One parsed schema-v10 record from the tailer -> log stream."""
+        """One parsed record from the tailer -> log stream.
+
+        A `server_start` record also carries the public model id (a stable
+        machine-log field); backfill it if stderr did not provide one, so
+        the header can name the model even on a log format we don't parse.
+        """
+        if rec.get("event") == "server_start":
+            mid = (rec.get("server") or {}).get("public_model_id")
+            if mid:
+                with self.lock:
+                    if not self.model_id:
+                        self.model_id = mid
+                        changed = True
+                    else:
+                        changed = False
+                if changed:
+                    self.bus.publish({"kind": "state", **self.snapshot()})
         self.bus.publish({"kind": rec.get("event", "unknown"), "record": rec})
 
     def on_child_exit(self, code: int, stopping: bool) -> None:

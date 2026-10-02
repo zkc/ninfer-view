@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """Fake ninfer-serve for exercising the dashboard without loading a model.
 
-Two output streams, both matching the real binary:
+Two output streams, both matching the latest binary:
 
-1. The current structured stderr startup log
-   (``[ninfer-serve] startup phase=... status=begin|complete ...``,
-   ``engine status=ready``, ``server status=ready ...`` and
-   ``request id=N status=...`` / ``throughput ...`` activity lines) over
-   ~8 seconds.
-2. Realistic schema-v10 records into the file named by
-   ``--request-log-jsonl PATH`` (server_start after load, then
-   request_start / request_done / request_rejected / throughput), the same
-   shape ninfer-serve's JsonlRequestLog emits — the dashboard's log stream
-   is fed from this file only.
+1. The current *pretty* operational stderr (product logging):
+   ``YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`` with "| "-separated
+   clauses — "loading weights | ...", "weights ready | ...",
+   "engine ready | ...", "warmup complete | ...",
+   "listening on http://... | model ... | auth ...", then
+   "req#N ..." and "throughput | ..." activity lines. (Upstream this
+   format is "intentionally not parsed"; the dashboard's ground truth is
+   /health, which this fake serves too.)
+2. A /health endpoint with the real lifecycle: the port is bound at spawn
+   but nothing is accepted until the ready sequence completes, so
+   /health only answers 200 {"status":"ok"} once "server ready" has been
+   logged — exactly like ninfer-serve's bind → load → warmup → attach →
+   listen ordering.
+3. Realistic schema-v10 records into the file named by
+   ``--request-log-jsonl PATH`` (server_start at attach — model loaded,
+   before the listening line — then request_start / request_done /
+   request_rejected / throughput), the same shape ninfer-serve's
+   JsonlRequestLog emits; the dashboard's log stream is fed from this
+   file only.
 
 A real SIGINT/SIGTERM makes it log a stop line and exit 0, matching the
 supervised clean-stop path.
@@ -22,31 +31,32 @@ Usage (point a profile's "binary" at this file):
         [--request-log-jsonl PATH]
 """
 
+from __future__ import annotations
+
 import json
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL_ID = "fake-model-1"
+TOTAL_BYTES = 13209497446  # matches the JSONL artifact payload below
 
 
 def ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def log(msg: str, level: str = "info") -> None:
-    sys.stderr.write(f"[{ts()}] [{level}] [ninfer-serve] {msg}\n")
+def log(msg: str, level: str = "INFO ") -> None:
+    # Service presentation: timestamp + 2 spaces + 5-char level + 1 space.
+    sys.stderr.write(f"{ts()}  {level} {msg}\n")
     sys.stderr.flush()
 
 
-def on_signal(signum, frame):
-    log("stopping via SIGINT")
-    sys.exit(0)
-
-
-# -- argv ------------------------------------------------------------------
+# -- argv --------------------------------------------------------------------
 
 def parse_args(argv: list[str]) -> dict:
     args = {"host": "127.0.0.1", "port": 8099, "jsonl": None}
@@ -87,60 +97,81 @@ class Jsonl:
             f.flush()
 
 
+# -- /health endpoint ---------------------------------------------------------
+
+class Health(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b'{"status":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_httpd: ThreadingHTTPServer | None = None   # bound at spawn (like bind())
+_listen_thread: threading.Thread | None = None  # started after ready
+
+
+def on_signal(signum, frame):
+    log("server stopped")
+    if _listen_thread is not None:
+        _httpd.shutdown()
+        _httpd.server_close()
+    sys.exit(0)
+
+
 def main() -> None:
+    global _httpd, _listen_thread
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
     a = parse_args(sys.argv[1:])
     jsonl = Jsonl(a["jsonl"])
 
-    total_bytes = 13209497446  # matches the JSONL artifact payload below
-    log("startup phase=engine-startup status=begin")
-    log("startup phase=cuda-initialize status=begin")
+    # Bind the port immediately (the real binary binds before loading);
+    # nothing is accepted until listen() after the ready sequence, so
+    # /health stays unreachable/down while the "model" loads.
+    _httpd = ThreadingHTTPServer((a["host"], a["port"]), Health)
+
+    # -- engine startup (pretty, INFO level = what a default run shows) ----
+    log("starting engine")
+    log(f"loading weights | 19.73 GiB")
+    # Rate-limited persistent progress records (redirected stderr): the
+    # real binary emits at most one per 10 s; this fake paces one per
+    # second so the dashboard's progress bar is visible in the test run.
+    for pct in (12.5, 37.5, 62.5, 87.5):
+        time.sleep(1)
+        done = (TOTAL_BYTES * pct / 100) / 1024 ** 3
+        eta = (100 - pct) / 12.5
+        log(f"  loading weights {pct:.1f}% | {done:.2f} GiB/19.73 GiB"
+            f" | 4.38 GiB/s | ETA {eta:.1f}s")
+    time.sleep(0.5)
+    log(f"weights ready | 19.73 GiB | 4.5s | 4.38 GiB/s")
+    log("pinning host state | 1.00 GiB")
     time.sleep(1)
-    log("startup phase=cuda-initialize status=complete duration_ms=229.309")
-    log("startup phase=artifact-inspect status=begin")
-    log("startup phase=artifact-inspect status=complete duration_ms=3.164")
-    log("startup phase=target-plan status=begin")
-    log("startup phase=target-plan status=complete duration_ms=26.542")
-    log(f"startup phase=weights-materialize status=begin"
-        f" total_bytes={total_bytes}")
-    # The current binary emits no intermediate progress lines while
-    # materializing; the phase jumps 0% -> 100% at completion.
-    time.sleep(4)
-    log(f"startup phase=weights-materialize status=complete"
-        f" completed_bytes={total_bytes} total_bytes={total_bytes}"
-        " duration_ms=4000.000")
-    log("startup phase=target-finalize status=begin")
-    log("startup phase=target-finalize status=complete duration_ms=2.635")
-    log("startup phase=frontend-initialize status=begin")
-    log("startup phase=frontend-initialize status=complete duration_ms=327.474")
-    log("startup phase=program-initialize status=begin")
-    log("startup phase=host-state-pin status=begin total_bytes=1073741824")
+    log("host state pinned | 1.00 GiB | 1.0s")
+    log("pinning host KV | 2.00 GiB")
+    time.sleep(0.2)
+    log("host KV pinned | 2.00 GiB | 150 ms")
+    log("CUDA graphs ready | 532 ms")
+    log(f"engine ready | {MODEL_ID} | total 6.0s | weights 19.73 GiB"
+        " | CUDA sync off")
+    log("capacity | KV 245,000 tokens, int8, auto | pages 3,828/4,096"
+        " | runtime 1.00 GiB | free 2.00 GiB")
+    log("context cache | 2 active + 2 cached device states"
+        " | host 16 states, 24.00 GiB KV | private 32 | shared 8"
+        " | anchors 4")
     time.sleep(1)
-    log("startup phase=host-state-pin status=complete"
-        " completed_bytes=1073741824 total_bytes=1073741824"
-        " duration_ms=1000.000")
-    log("startup phase=host-kv-pin status=begin total_bytes=2147483648")
-    log("startup phase=host-kv-pin status=complete completed_bytes=2147483648"
-        " total_bytes=2147483648 duration_ms=150.000")
-    log("startup phase=cuda-graph-prepare status=begin")
-    log("startup phase=cuda-graph-prepare status=complete duration_ms=532.571")
-    log("startup phase=program-initialize status=complete"
-        " duration_ms=6000.000")
-    log("startup phase=engine-finalize status=begin")
-    log("startup phase=engine-finalize status=complete duration_ms=0.282")
-    log("startup phase=engine-startup status=complete duration_ms=10500.000")
-    log(f"engine status=ready target=\"fake\" model_id=\"{MODEL_ID}\""
-        " weights_id=\"fake-weights-1\" target_load_ms=10500.000"
-        " materialization_pipeline_ms=4000.000"
-        f" artifact_bytes_read={total_bytes} host_to_device_bytes={total_bytes}"
-        " peak_staging_bytes=1073741824 tensors=290 resources=4")
-    log("engine capacity kv_capacity_mode=auto kv_capacity_tokens=245000"
-        " kv_page_groups=3828 kv_max_page_groups=4096"
-        " runtime_reservation_bytes=1073741824"
-        " available_after_weights_bytes=3221225472"
-        " available_after_startup_bytes=2147483648")
-    # server_start is written at attach: model loaded, warmup not yet done.
+    log("warmup complete | 1.0s")
+
+    # -- attach: server_start is written here, before the listening line ---
     jsonl.emit(
         "server_start",
         server={
@@ -154,8 +185,8 @@ def main() -> None:
         },
         artifact={
             "path": "/dev/null", "size_bytes": None, "target": "fake",
-            "weights_id": "fake-weights-1", "bytes_read": 13209497446,
-            "host_to_device_bytes": 13209497446, "peak_staging_bytes": 1073741824,
+            "weights_id": "fake-weights-1", "bytes_read": TOTAL_BYTES,
+            "host_to_device_bytes": TOTAL_BYTES, "peak_staging_bytes": 1073741824,
             "tensor_count": 290, "resource_count": 4,
             "load_seconds": 10.5, "upload_seconds": 10.2,
         },
@@ -184,8 +215,8 @@ def main() -> None:
         },
         memory={
             "weights": {"capacity_bytes": 14495514624,
-                        "used_bytes": 13209497446,
-                        "peak_used_bytes": 13209497446},
+                        "used_bytes": TOTAL_BYTES,
+                        "peak_used_bytes": TOTAL_BYTES},
             "sequence": {"capacity_bytes": 1073741824, "used_bytes": 524288000,
                          "peak_used_bytes": 524288000},
             "workspace": {"capacity_bytes": 1073741824, "used_bytes": 104857600,
@@ -205,7 +236,7 @@ def main() -> None:
         },
         environment={
             "device": 0, "gpu_name": "NVIDIA H100 80GB HBM3",
-            "gpu_uuid": "GPU-12345678-1234-1234-1234-123456789abc",
+            "gpu_uuid": "GPU-12345678-1234-2234-1234-123456789abc",
             "total_device_memory_bytes": 85899345920,
             "compute_capability_major": 9, "compute_capability_minor": 0,
             "cuda_compile_version": "12.8", "cuda_runtime_version": "12.8",
@@ -214,11 +245,13 @@ def main() -> None:
         argv=[sys.argv[0], "--host", a["host"], "--port", str(a["port"]),
               "--request-log-jsonl", a["jsonl"] or ""],
     )
-    log("startup phase=serve-warmup status=begin")
-    time.sleep(1)
-    log("startup phase=serve-warmup status=complete duration_ms=1000.000")
-    log(f"server status=ready host=\"{a['host']}\" port={a['port']}"
-        f" model_id=\"{MODEL_ID}\" auth_enabled=false")
+    log(f"listening on http://{a['host']}:{a['port']} | model {MODEL_ID}"
+        " | auth disabled")
+
+    # -- listen: only now does /health answer (and accept requests) --------
+    _listen_thread = threading.Thread(target=_httpd.serve_forever,
+                                      daemon=True, name="health-listen")
+    _listen_thread.start()
 
     # One accepted request (with thinking) and one rejection to exercise the
     # red rows in the dashboard.
@@ -245,9 +278,8 @@ def main() -> None:
             "built_patch_bytes": 0, "reused_patch_bytes": 0,
         },
     )
-    log("request id=1 status=submitted protocol=\"openai_chat\" stream=false"
-        " messages=2 media_items=0 requested_output_tokens=128 tools=0"
-        " thinking=true reasoning_effort=medium preserve_thinking=false")
+    log("req#1 started | openai-chat non-stream | 2 messages | max output 128"
+        " | thinking medium")
     time.sleep(1)
     jsonl.emit(
         "request_done",
@@ -279,11 +311,10 @@ def main() -> None:
             "fallback_steps": 0, "accepted_per_position": 2.5,
         },
     )
-    log("request id=1 status=done finish_reason=stop_token prompt_tokens=42"
-        " completion_tokens=128 prefix_cache_hit_tokens=40"
-        " prefix_reuse_path=append_frontier ttft_ms=95.000 duration_ms=2400.000"
-        " prefill_tokens_per_second=8100.000"
-        " decode_tokens_per_second=55.000")
+    log("req#1 done | openai-chat | stop token | prompt 42 | output 128"
+        " | cache 40 (95.2%, turn closure) | TTFT 95ms | total 2.4s"
+        " | prefill 8k tok/s | decode 55.0 tok/s"
+        " | mtp accepted 72/87 (82.8%)")
     jsonl.emit(
         "request_rejected",
         phase="prepare",
@@ -301,14 +332,11 @@ def main() -> None:
                        " context ceiling (262144)",
         },
     )
-    log("request id=2 status=rejected phase=prepare protocol=openai_responses"
-        " stream=true messages=1 media_items=0 requested_output_tokens=8192"
-        " tools=0 status=400 code=context_length_exceeded"
-        " message=expanded prompt (40980 tokens) exceeds the configured context"
-        " ceiling (262144)")
+    log("req#2 rejected during prepare | openai-responses stream | HTTP 400"
+        " | context length exceeded | messages 1")
 
     def throughput_event(prefill: int, decode: int, running: int,
-                          rounds: int, row_rounds: int) -> None:
+                         rounds: int, row_rounds: int) -> None:
         interval = 5.0
         jsonl.emit(
             "throughput",
@@ -322,14 +350,15 @@ def main() -> None:
             decode_batch={"rounds": rounds, "row_rounds": row_rounds,
                           "average_size": (row_rounds / rounds) if rounds else None},
         )
-        log(
-            f"throughput interval_ms={interval * 1000:.3f}"
-            f" computed_prefill_tokens={prefill} committed_decode_tokens={decode}"
-            f" prefill_tokens_per_second={prefill / interval:.3f}"
-            f" decode_tokens_per_second={decode / interval:.3f} running={running}"
-            f" prefilling=0 decode_ready={running} waiting=0"
-            f" average_decode_batch={(row_rounds / rounds) if rounds else 0:.3f}"
-        )
+        parts = ["throughput | 5.0s"]
+        if prefill != 0:
+            parts.append(f"prefill {prefill / interval:.1f} tok/s"
+                         f" ({prefill} tok)")
+        parts.append(f"decode {decode / interval:.1f} tok/s ({decode} tok)")
+        parts.append(f"running {running} (decode-ready {running})")
+        parts.append(f"batch {(row_rounds / rounds) if rounds else 0:.2f}")
+        parts.append("host 30.0% (1.5s)")
+        log(" | ".join(parts))
 
     throughput_event(210, 275, 1, 55, 55)
     while True:

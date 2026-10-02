@@ -1,6 +1,6 @@
 """Parse ninfer-serve stderr console output into structured events.
 
-Two line formats, depending on the ninfer-serve version:
+Three line formats, depending on the ninfer-serve version:
 
 Legacy (pre-structured-logging builds):
 
@@ -10,7 +10,7 @@ Legacy (pre-structured-logging builds):
     "model loaded in N s", "listening on ..."), LoadProgressRenderer
     load-progress lines, and "[req N] ..." activity lines.
 
-Current (structured startup logs):
+Structured startup logs (spdlog build):
 
     [YYYY-MM-DD HH:MM:SS.mmm] [info|warning|error|critical] [ninfer-serve] <message>
 
@@ -26,9 +26,23 @@ Current (structured startup logs):
         request id=N status=submitted|done|...   (activity)
         throughput ...                            (activity)
 
-Both are classified into the same event kinds (progress | lifecycle |
-activity | console) so the state machine and the dashboard are
-format-agnostic. In the current format there are no intermediate
+Pretty startup logs (latest build, product logging):
+
+    YYYY-MM-DD HH:MM:SS.mmm  LEVEL  <message>
+
+    LEVEL is a fixed 5-char token (TRACE|DEBUG|ERROR|FATAL|INFO␣|WARN␣);
+    the message is a human presentation of "| "-separated clauses, e.g.
+    "loading weights | 19.73 GiB", "weights ready | 19.73 GiB | 9.5s",
+    "engine ready | qwen3.8-27b | total 10.5s | ...",
+    "listening on http://127.0.0.1:8081 | model ... | auth disabled",
+    "throughput | 5.0s | ...", "req#13 done | ...". Upstream the pretty
+    view is "intentionally not parsed"; we classify only the stable
+    clauses that drive the state machine and progress bar, and treat
+    the /health endpoint (not stderr) as the ground truth for readiness.
+
+All three are classified into the same event kinds (progress | lifecycle
+| activity | console) so the state machine and the dashboard are
+format-agnostic. In the structured format there are no intermediate
 progress lines: byte-count phases emit 0% on ``status=begin`` and 100%
 on ``status=complete``.
 """
@@ -165,6 +179,130 @@ LOADING_MSG = "loading model..."
 WARMING_MSG = "warming up..."
 
 
+# --- pretty format (latest product-logging build) ---------------------------
+#
+#   2026-09-02 23:12:56.607  INFO  weights ready | 19.73 GiB | 9.5s
+#
+# timestamp + two spaces + 5-char level token (INFO/WARN carry a trailing
+# pad space) + one space + the message. The phase names below are the
+# PhasePresentation active/complete strings from startup_log.cpp.
+
+PRETTY_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})  "
+    r"(TRACE|DEBUG|ERROR|FATAL|INFO |WARN ) (.*)$"
+)
+PRETTY_LEVELS = {
+    "TRACE": "debug", "DEBUG": "debug", "INFO ": "info",
+    "WARN ": "warning", "ERROR": "error", "FATAL": "critical",
+}
+
+# Byte phases whose begin/complete lines carry a pretty byte total.
+PRETTY_PROGRESS_START = ("loading weights", "pinning host state",
+                         "pinning host KV")
+PRETTY_PROGRESS_DONE = ("weights ready", "host state pinned", "host KV pinned")
+
+# Rate-limited persistent progress record (redirected stderr):
+# "  loading weights 43.2% | 8.52 GiB/19.73 GiB | 1.31 GiB/s | ETA 9.1s"
+WEIGHTS_PROGRESS_RE = re.compile(
+    r"^\s*loading weights (\d+\.\d+)% \| (\S+ \S+)/(\S+ \S+)")
+ENGINE_READY_RE = re.compile(r"^engine ready \| ([^|]+) \| total ([^|]+)")
+LISTENING_PRETTY_RE = re.compile(
+    r"^listening on (http://\S+) \| model ([^|]+?) \| auth (\S+)$")
+
+
+def _pretty_duration_s(text: str) -> float | None:
+    """Parse a pretty duration: "532 us" | "150 ms" | "9.5s" |
+    "5m 21.0s" | "1h 2m" (format_pretty_duration)."""
+    t = text.strip()
+    m = re.fullmatch(r"(\d+) us", t)
+    if m:
+        return int(m.group(1)) / 1e6
+    m = re.fullmatch(r"([\d.]+) ms", t)
+    if m:
+        return float(m.group(1)) / 1e3
+    m = re.fullmatch(r"([\d.]+)s", t)
+    if m:
+        return float(m.group(1))
+    m = re.fullmatch(r"(\d+)m ([\d.]+)s", t)
+    if m:
+        return int(m.group(1)) * 60 + float(m.group(2))
+    m = re.fullmatch(r"(\d+)h (\d+)m", t)
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60
+    return None
+
+
+def _progress_str(phase: str, percent: float, done: str, total: str,
+                  elapsed_s: float) -> dict:
+    """Progress dict from already-human-readable pretty byte strings."""
+    return {"phase": phase, "percent": percent, "done": done,
+            "total": total, "elapsed_s": elapsed_s}
+
+
+def _parse_pretty(msg: str, ev: dict) -> dict | None:
+    """Classify a pretty-format message; None if it is a plain line."""
+    s = msg.strip()
+    if s == "starting engine":
+        ev.update(kind="lifecycle", phase="loading")
+        return ev
+
+    wm = WEIGHTS_PROGRESS_RE.match(msg)
+    if wm:
+        ev["kind"] = "progress"
+        ev["progress"] = _progress_str("loading weights", float(wm.group(1)),
+                                       wm.group(2), wm.group(3), None)
+        return ev
+
+    for name in PRETTY_PROGRESS_START:
+        if s.startswith(name + " | "):
+            ev["kind"] = "progress"
+            ev["progress"] = _progress_str(name, 0.0, "0 B",
+                                           s.split(" | ", 1)[1], 0.0)
+            return ev
+    for name in PRETTY_PROGRESS_DONE:
+        if s.startswith(name + " | "):
+            parts = s.split(" | ")
+            secs = _pretty_duration_s(parts[2]) if len(parts) > 2 else None
+            ev["kind"] = "progress"
+            ev["progress"] = _progress_str(name, 100.0, parts[1], parts[1],
+                                           secs if secs is not None else 0.0)
+            return ev
+
+    em = ENGINE_READY_RE.match(s)
+    if em:
+        ev.update(kind="lifecycle", phase="loaded",
+                  model_id=em.group(1).strip(),
+                  load_seconds=_pretty_duration_s(em.group(2)))
+        return ev
+
+    if s.startswith("capacity | "):
+        ev.update(kind="lifecycle", phase="kv")
+        return ev
+
+    if s == "warming up" or s.startswith("warmup complete"):
+        ev.update(kind="lifecycle", phase="warming")
+        return ev
+
+    lm = LISTENING_PRETTY_RE.match(s)
+    if lm:
+        ev.update(kind="lifecycle", phase="listening", endpoint=lm.group(1),
+                  model_id=lm.group(2).strip(), auth=lm.group(3))
+        return ev
+
+    if s.startswith("throughput | ") or s.startswith("req#"):
+        ev["kind"] = "activity"
+        return ev
+
+    if s.startswith("startup failed") or s.startswith("warmup failed") \
+            or s.startswith("server failed during") \
+            or s.startswith("cannot bind") \
+            or s.startswith("server listen failed"):
+        ev.update(kind="lifecycle", phase="failed", detail=s)
+        return ev
+
+    return None  # context cache / media / memory ledger etc. stay plain console
+
+
 def parse_line(raw: str) -> dict:
     """Parse one stderr line into an event dict.
 
@@ -174,6 +312,13 @@ def parse_line(raw: str) -> dict:
     line = raw.rstrip("\r\n")
     m = LINE_RE.match(line)
     if not m:
+        pm = PRETTY_RE.match(line)
+        if pm:
+            ev = {"kind": "console", "ts": pm.group(1),
+                  "level": PRETTY_LEVELS[pm.group(2)],
+                  "message": pm.group(3), "raw": line}
+            cur = _parse_pretty(pm.group(3), ev)
+            return cur if cur is not None else ev
         return {"kind": "console", "ts": None, "level": "info",
                 "message": line, "raw": line}
 
