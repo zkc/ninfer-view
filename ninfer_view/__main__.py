@@ -1,6 +1,7 @@
 """CLI entry point.
 
     python3 -m ninfer_view [--host 127.0.0.1] [--port 18080] [--load]
+                           [--profile <id>]
 """
 
 from __future__ import annotations
@@ -24,10 +25,20 @@ def main() -> None:
     ap.add_argument("--load", action="store_true",
                     help="launch the default profile (load the model) at "
                          "startup")
+    ap.add_argument("--profile", metavar="ID",
+                    help="launch the given profile at startup (implies "
+                         "--load); if unknown, start normally without "
+                         "loading")
     args = ap.parse_args()
 
     service = Service(Profiles())
-    if args.load:
+    if args.profile:
+        ok, err = service.start(args.profile)
+        if ok:
+            print(f"loading model (profile {args.profile!r})")
+        else:
+            print(f"--profile: not loading ({err})", file=sys.stderr)
+    elif args.load:
         ok, err = service.start("default")
         if ok:
             print("loading model (default profile)")
